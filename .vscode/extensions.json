@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "hnw.vscode-auto-open-markdown-preview",
+    "naumovs.color-highlight",
+    "oderwat.indent-rainbow",
+    "coenraads.bracket-pair-colorizer"
+  ]
+}
