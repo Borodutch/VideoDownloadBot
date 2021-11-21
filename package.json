@@ -22,6 +22,7 @@
     "grammy": "^1.4.2",
     "mongoose": "^6.0.13",
     "mongoose-findorcreate": "^3.0.0",
+    "random-token": "^0.0.8",
     "youtube-dl-exec": "^2.0.0"
   },
   "devDependencies": {

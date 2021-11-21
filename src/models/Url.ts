@@ -16,6 +16,8 @@ export class Url extends FindOrCreate {
   url: string
   @prop({ required: true, index: true })
   formatId: string
+  @prop({ required: true, index: true })
+  fileId: string
   @prop({ required: true })
   video: Video
 }
@@ -28,6 +30,9 @@ export function findUrl(url: string) {
   return UrlModel.findOne({ url })
 }
 
-export function findOrCreateUrl(url: string, video: Video) {
-  return UrlModel.findOrCreate({ url }, { video })
+export function findOrCreateUrl(url: string, video: Video, formatId: string) {
+  return UrlModel.findOrCreate(
+    { url },
+    { video, fileId: video.file_id, formatId }
+  )
 }

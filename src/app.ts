@@ -11,6 +11,7 @@ import { sendLanguage, setLanguage } from '@/handlers/language'
 import attachUser from '@/middlewares/attachUser'
 import bot from '@/helpers/bot'
 import configureI18n from '@/middlewares/configureI18n'
+import handleSelectFormat from '@/handlers/handleSelectFormat'
 import handleUrl from '@/handlers/handleUrl'
 import i18n from '@/helpers/i18n'
 import ignoreOldMessageUpdates from '@/middlewares/ignoreOldMessageUpdates'
@@ -39,6 +40,7 @@ async function runApp() {
   )
   // Actions
   bot.callbackQuery(localeActions, setLanguage)
+  bot.callbackQuery(/.+~.+/, handleSelectFormat)
   // Errors
   bot.catch(console.error)
   // Start bot

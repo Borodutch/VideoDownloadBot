@@ -5,3 +5,5 @@ language: Пожалуйста, выберите язык.
 language_selected: Теперь я говорю по-русски.
 invalid_url: Я не смог найти видео по этой ссылке.
 video_download_error: Не получилось загрузить это видео.
+select_format: Выберите формат и качество файла.
+megabytes: Мб

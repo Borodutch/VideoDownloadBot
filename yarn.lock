@@ -2941,6 +2941,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"random-token@npm:^0.0.8":
+  version: 0.0.8
+  resolution: "random-token@npm:0.0.8"
+  checksum: a9cb952bbe84c4fbf90094c32bd3d9f0758861aacf9a9c8fa838207c30c529119402636a901c49f124a49bf72b5ea55e1170e4fbee98a953c0ef4e233730b8a6
+  languageName: node
+  linkType: hard
+
 "rc@npm:^1.2.8":
   version: 1.2.8
   resolution: "rc@npm:1.2.8"
@@ -3689,6 +3696,7 @@ __metadata:
     mongoose-findorcreate: ^3.0.0
     nodemon: ^2.0.15
     prettier: ^2.4.1
+    random-token: ^0.0.8
     typescript: ^4.5.2
     youtube-dl-exec: ^2.0.0
   languageName: unknown

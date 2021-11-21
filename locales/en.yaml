@@ -4,4 +4,6 @@ help: |
 language: Please, select the language.
 language_selected: I speak English now.
 invalid_url: I couldn't find a video with that link.
-video_download_error: Не получилось загрузить это видео.
+video_download_error: Could not download the video.
+select_format: Select the format and the quality of the file.
+megabytes: Mb
