@@ -11,6 +11,7 @@ import { sendLanguage, setLanguage } from '@/handlers/language'
 import attachUser from '@/middlewares/attachUser'
 import bot from '@/helpers/bot'
 import configureI18n from '@/middlewares/configureI18n'
+import handleUrl from '@/handlers/handleUrl'
 import i18n from '@/helpers/i18n'
 import ignoreOldMessageUpdates from '@/middlewares/ignoreOldMessageUpdates'
 import sendHelp from '@/handlers/sendHelp'
@@ -31,6 +32,11 @@ async function runApp() {
   // Commands
   bot.command(['help', 'start'], sendHelp)
   bot.command('language', sendLanguage)
+  // Handlers
+  bot.hears(
+    /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i,
+    handleUrl
+  )
   // Actions
   bot.callbackQuery(localeActions, setLanguage)
   // Errors

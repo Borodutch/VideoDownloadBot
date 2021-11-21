@@ -1,9 +1,9 @@
 {
-  "name": "telegram-bot-starter",
+  "name": "video-download-bot",
   "version": "1.0.0",
-  "description": "Telegram bot starter based on grammY",
+  "description": "Telegram bot to download videos",
   "main": "dist/app.js",
-  "repository": "https://github.com/Borodutch/telegram-bot-template",
+  "repository": "https://github.com/Borodutch/VideoDownloadBot",
   "author": "backmeupplz <backmeupplz@gmail.com>",
   "license": "MIT",
   "scripts": {
@@ -19,9 +19,10 @@
     "@grammyjs/i18n": "^0.3.0",
     "@grammyjs/runner": "^1.0.2",
     "@typegoose/typegoose": "^9.2.0",
-    "grammy": "^1.4.0",
+    "grammy": "^1.4.2",
     "mongoose": "^6.0.13",
-    "mongoose-findorcreate": "^3.0.0"
+    "mongoose-findorcreate": "^3.0.0",
+    "youtube-dl-exec": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^16.11.9",

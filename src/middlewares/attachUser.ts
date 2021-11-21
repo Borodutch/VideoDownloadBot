@@ -1,9 +1,9 @@
 import { NextFunction } from 'grammy'
-import { findOrCreateUser } from '@/models/User'
+import { findOrCreateChat } from '@/models/Chat'
 import Context from '@/models/Context'
 
-export default async function attachUser(ctx: Context, next: NextFunction) {
-  const { doc } = await findOrCreateUser(ctx.from.id)
-  ctx.dbuser = doc
+export default async function attachChat(ctx: Context, next: NextFunction) {
+  const { doc } = await findOrCreateChat(ctx.from.id)
+  ctx.dbchat = doc
   return next()
 }

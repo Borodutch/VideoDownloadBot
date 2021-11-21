@@ -1,5 +1,7 @@
 name: English
 help: |
-  <b>This bot</b> allows you to see how Telegram bots can be built.
+  Send me a video link, and I'll download it to this chat!
 language: Please, select the language.
-language_selected: <b>This bot</b> now speaks English.
+language_selected: I speak English now.
+invalid_url: I couldn't find a video with that link.
+video_download_error: Не получилось загрузить это видео.

@@ -15,8 +15,8 @@ export async function setLanguage(ctx: Context) {
   if (!ctx.callbackQuery.data) {
     return
   }
-  ctx.dbuser.language = ctx.callbackQuery.data
-  await ctx.dbuser.save()
+  ctx.dbchat.language = ctx.callbackQuery.data
+  await ctx.dbchat.save()
   ctx.i18n.locale(ctx.callbackQuery.data)
   return ctx.editMessageText(ctx.i18n.t('language_selected'), {
     parse_mode: 'HTML',
