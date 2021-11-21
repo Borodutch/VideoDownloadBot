@@ -26,6 +26,8 @@ export default async function handleUrl(ctx: Context) {
     /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i
   )
   if (!match || !match[0]) {
+    // Turn off typing on cooldown
+    clearInterval(typingInterval)
     return ctx.reply(ctx.i18n.t('invalid_url'), {
       reply_to_message_id: ctx.message.message_id,
     })
@@ -57,6 +59,8 @@ export default async function handleUrl(ctx: Context) {
       reply_markup: await keyboard(deduplicateFormats(availableFormats), url),
     })
   } catch (error) {
+    // Turn off typing on cooldown
+    clearInterval(typingInterval)
     report(error, { ctx })
     return ctx.reply(ctx.i18n.t('video_download_error'), {
       reply_to_message_id: ctx.message.message_id,

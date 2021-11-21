@@ -12,3 +12,7 @@ still_downloading: Still downloading, be patient, I'll show you an error if some
 download_complete: 🎉 Download complete!
 video_caption: Downloaded with @${bot} powered by <a href="https://todorant.com">Todorant</a>
 already_downloading: The file is already being downloaded.
+error: An error occurred.
+error_message: Could not download the file. Please, try another file or another format.
+error_already_in_progress: The file is already being downloaded. Please, wait or try again later.
+error_reboot: The server rebooted, while I was downloading this file. Please, try again later.

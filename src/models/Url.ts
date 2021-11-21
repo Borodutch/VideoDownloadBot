@@ -32,7 +32,7 @@ export function findUrl(url: string, formatId: string) {
 
 export function findOrCreateUrl(url: string, video: Video, formatId: string) {
   return UrlModel.findOrCreate(
-    { url },
-    { video, fileId: video.file_id, formatId }
+    { url, formatId },
+    { video, fileId: video.file_id }
   )
 }
