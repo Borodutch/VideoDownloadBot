@@ -12,6 +12,8 @@ import attachUser from '@/middlewares/attachUser'
 import bot from '@/helpers/bot'
 import cleanupDownloadJobs from '@/helpers/cleanupDownloadJobs'
 import configureI18n from '@/middlewares/configureI18n'
+import handleAudio from '@/handlers/handleAudio'
+import handleChooseFormats from '@/handlers/handleChooseFormats'
 import handleSelectFormat from '@/handlers/handleSelectFormat'
 import handleUrl from '@/handlers/handleUrl'
 import i18n from '@/helpers/i18n'
@@ -35,6 +37,8 @@ async function runApp() {
   // Commands
   bot.command(['help', 'start'], sendHelp)
   bot.command('language', sendLanguage)
+  bot.command('audio', handleAudio)
+  bot.command('chooseFormats', handleChooseFormats)
   // Handlers
   bot.hears(
     /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i,

@@ -8,6 +8,7 @@ export const localeActions = localesFiles().map((file) => file.split('.')[0])
 export function sendLanguage(ctx: Context) {
   return ctx.reply(ctx.i18n.t('language'), {
     reply_markup: languageKeyboard(),
+    reply_to_message_id: ctx.message.message_id,
   })
 }
 

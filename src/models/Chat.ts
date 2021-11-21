@@ -8,6 +8,10 @@ export class Chat extends FindOrCreate {
   telegramId: number
   @prop({ required: true, default: 'en' })
   language: string
+  @prop({ required: true, default: false })
+  audio: boolean
+  @prop({ required: true, default: false })
+  chooseFormats: boolean
 }
 
 const ChatModel = getModelForClass(Chat, {

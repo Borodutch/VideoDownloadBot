@@ -1,6 +1,11 @@
 name: English
 help: |
   Send me a video link, and I'll download it to this chat!
+
+  /help — this message
+  /language — change language
+  /audio — convert all files to audio
+  /chooseFormats — ask to choose file formats
 language: Please, select the language.
 language_selected: I speak English now.
 invalid_url: I couldn't find a video with that link.
@@ -16,3 +21,7 @@ error: An error occurred.
 error_message: Could not download the file. Please, try another file or another format.
 error_already_in_progress: The file is already being downloaded. Please, wait or try again later.
 error_reboot: The server rebooted, while I was downloading this file. Please, try again later.
+audio_on: I will convert all files to audio-only automatically.
+audio_off: I will not convert all files to audio-only automatically.
+choose_formats_on: I will ask you to choose the format and the quality of files.
+choose_formats_off: I will not ask you to choose the format and the quality of files.
