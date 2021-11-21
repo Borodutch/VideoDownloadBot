@@ -21,18 +21,17 @@ export default async function handleSelectFormat(ctx: Context) {
   let formatId: string
   let url: string
   let created = false
+  let errorEncountered = false
   try {
     // Answer the query to remove the waiting ui on Telegram
     await ctx.answerCallbackQuery()
     // Make user know that the file is being downloaded
     await ctx.editMessageText(ctx.i18n.t('downloading'))
     const data = ctx.callbackQuery.data.split('~')
-    formatId = data[0]
+    const { formatId, formatName } = await ShortFormatModel.findOne({
+      shortId: data[0],
+    })
     url = (await ShortUrlModel.findOne({ shortId: data[1] })).url
-    if (formatId.length > 9) {
-      formatId = (await ShortFormatModel.findOne({ shortId: formatId }))
-        .formatId
-    }
     // Create caption
     const caption = ctx.i18n.t('video_caption', {
       bot: bot.botInfo.username,
@@ -41,11 +40,14 @@ export default async function handleSelectFormat(ctx: Context) {
     const cachedUrl = await findUrl(url, formatId)
     if (cachedUrl) {
       await ctx.editMessageText(ctx.i18n.t('download_complete'))
-      return ctx.replyWithVideo(cachedUrl.fileId, {
+      const config = {
         reply_to_message_id: ctx.callbackQuery.message.message_id,
         caption,
-        parse_mode: 'HTML',
-      })
+        parse_mode: 'HTML' as const,
+      }
+      return formatName.includes('audio')
+        ? ctx.replyWithAudio(cachedUrl.fileId, config)
+        : ctx.replyWithVideo(cachedUrl.fileId, config)
     }
     const findOrCreateResult = await findOrCreateDownloadJob(
       ctx.dbchat.telegramId,
@@ -77,17 +79,23 @@ export default async function handleSelectFormat(ctx: Context) {
       throw new Error(`Chosen format ${formatId} does not exist at url ${url}`)
     }
     const inputFile = new InputFile({ url: chosenFormat.url })
-    const file = await ctx.replyWithVideo(inputFile, {
+    const config = {
       reply_to_message_id: ctx.callbackQuery.message.message_id,
       caption,
-      parse_mode: 'HTML',
-    })
+      parse_mode: 'HTML' as const,
+    }
+    const sentMessage = formatName.includes('audio')
+      ? await ctx.replyWithAudio(inputFile, config)
+      : await ctx.replyWithVideo(inputFile, config)
+    const fileId =
+      ('video' in sentMessage && sentMessage.video.file_id) ||
+      ('audio' in sentMessage && sentMessage.audio?.file_id)
     // Cache the url and file id
-    const createdUrl = await findOrCreateUrl(url, file.video, formatId)
-    console.log(createdUrl)
+    await findOrCreateUrl(url, fileId, formatId, formatName)
     // Edit the "downloading" message
     await ctx.editMessageText(ctx.i18n.t('download_complete'))
   } catch (error) {
+    errorEncountered = true
     // Report the error to the admin
     report(error, { ctx, location: 'handleSelectFormat' })
     try {
@@ -106,7 +114,7 @@ export default async function handleSelectFormat(ctx: Context) {
     // No need to change the message so that user wouldn't panic anymore
     clearTimeout(stillDownloadingTimeout)
     // Remove the download job
-    if (created && url && formatId) {
+    if ((created || errorEncountered) && url && formatId) {
       await deleteDownloadJob(ctx.dbchat.telegramId, url, formatId)
     }
   }

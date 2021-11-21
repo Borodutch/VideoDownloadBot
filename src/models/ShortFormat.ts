@@ -9,12 +9,14 @@ export class ShortFormat extends FindOrCreate {
   shortId: string
   @prop({ required: true, index: true })
   formatId: string
+  @prop({ required: true })
+  formatName: string
 }
 
 export const ShortFormatModel = getModelForClass(ShortFormat, {
   schemaOptions: { timestamps: true },
 })
 
-export function findOrCreateShortFormat(formatId: string) {
-  return ShortFormatModel.findOrCreate({ formatId })
+export function findOrCreateShortFormat(formatId: string, formatName: string) {
+  return ShortFormatModel.findOrCreate({ formatId }, { formatName })
 }

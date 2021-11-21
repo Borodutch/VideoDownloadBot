@@ -1,25 +1,17 @@
 import * as findorcreate from 'mongoose-findorcreate'
 import { FindOrCreate } from '@typegoose/typegoose/lib/defaultClasses'
-import {
-  Severity,
-  getModelForClass,
-  modelOptions,
-  plugin,
-  prop,
-} from '@typegoose/typegoose'
-import { Video } from '@grammyjs/types'
+import { getModelForClass, plugin, prop } from '@typegoose/typegoose'
 
-@modelOptions({ options: { allowMixed: Severity.ALLOW } })
 @plugin(findorcreate)
 export class Url extends FindOrCreate {
-  @prop({ required: true, index: true, unique: true })
+  @prop({ required: true, index: true })
   url: string
   @prop({ required: true, index: true })
   formatId: string
   @prop({ required: true, index: true })
   fileId: string
   @prop({ required: true })
-  video: Video
+  formatName: string
 }
 
 const UrlModel = getModelForClass(Url, {
@@ -30,9 +22,11 @@ export function findUrl(url: string, formatId: string) {
   return UrlModel.findOne({ url, formatId })
 }
 
-export function findOrCreateUrl(url: string, video: Video, formatId: string) {
-  return UrlModel.findOrCreate(
-    { url, formatId },
-    { video, fileId: video.file_id }
-  )
+export function findOrCreateUrl(
+  url: string,
+  fileId: string,
+  formatId: string,
+  formatName: string
+) {
+  return UrlModel.findOrCreate({ url, formatId }, { fileId, formatName })
 }

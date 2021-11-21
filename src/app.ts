@@ -43,6 +43,8 @@ async function runApp() {
   // Actions
   bot.callbackQuery(localeActions, setLanguage)
   bot.callbackQuery(/.+~.+/, handleSelectFormat)
+  // Catch all
+  bot.use(sendHelp)
   // Errors
   bot.catch((botError) => {
     report(botError.error, { ctx: botError.ctx })

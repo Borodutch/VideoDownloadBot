@@ -39,7 +39,6 @@ export default async function handleUrl(ctx: Context) {
       dumpSingleJson: true,
       noWarnings: true,
       noCheckCertificate: true,
-      preferFreeFormats: true,
       youtubeSkipDashManifest: true,
       skipDownload: true,
       allFormats: true,
@@ -73,9 +72,9 @@ async function keyboard(formats: Format[], url: string) {
   const shortUrl = await ShortUrlModel.create({ url })
   let i = 0
   for (const format of formats) {
-    if (format.id.length > 9) {
-      format.id = (await findOrCreateShortFormat(format.id)).doc.shortId
-    }
+    format.id = (
+      await findOrCreateShortFormat(format.id, format.name)
+    ).doc.shortId
     result.add({
       callback_data: `${format.id}~${shortUrl.shortId}`,
       text: format.name,
