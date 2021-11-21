@@ -35,14 +35,22 @@ export default async function handleUrl(ctx: Context) {
   const url = match[0]
   // Get the info
   try {
+    console.log(ctx.dbchat.chooseFormats, ctx.dbchat.audio)
     const videoInfo = await youtubedl(url, {
       dumpSingleJson: true,
       noWarnings: true,
       noCheckCertificate: true,
       youtubeSkipDashManifest: true,
       skipDownload: true,
-      allFormats: true,
+      allFormats: ctx.dbchat.chooseFormats ? true : undefined,
+      format: ctx.dbchat.chooseFormats
+        ? ctx.dbchat.audio
+          ? 'bestaudio'
+          : 'best'
+        : undefined,
     })
+    console.log(videoInfo)
+    // return
     // Turn off typing on cooldown
     clearInterval(typingInterval)
     // Construct and return the formats keyboard
