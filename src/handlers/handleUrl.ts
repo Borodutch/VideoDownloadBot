@@ -12,7 +12,16 @@ interface Format {
 }
 
 export default async function handleUrl(ctx: Context) {
+  // Make sure the bot is typing until it gets the info
   await ctx.replyWithChatAction('typing')
+  const typingInterval = setInterval(async () => {
+    try {
+      await ctx.replyWithChatAction('typing')
+    } catch (error) {
+      report(error, { ctx, location: 'typing timeout' })
+    }
+  }, 1000 * 5)
+  // Find url
   const match = ctx.message.text.match(
     /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i
   )
@@ -22,6 +31,7 @@ export default async function handleUrl(ctx: Context) {
     })
   }
   const url = match[0]
+  // Get the info
   try {
     const videoInfo = await youtubedl(url, {
       dumpSingleJson: true,
@@ -32,6 +42,9 @@ export default async function handleUrl(ctx: Context) {
       skipDownload: true,
       allFormats: true,
     })
+    // Turn off typing on cooldown
+    clearInterval(typingInterval)
+    // Construct and return the formats keyboard
     const mb = ctx.i18n.t('megabytes')
     const availableFormats: Format[] = videoInfo.formats.map((v) => ({
       name: `${v.format.split(' - ')[1]}, ${v.ext}${
@@ -40,10 +53,11 @@ export default async function handleUrl(ctx: Context) {
       id: v.format_id,
     }))
     return ctx.reply(ctx.i18n.t('select_format'), {
+      reply_to_message_id: ctx.message.message_id,
       reply_markup: await keyboard(deduplicateFormats(availableFormats), url),
     })
   } catch (error) {
-    report(error as Error, { ctx })
+    report(error, { ctx })
     return ctx.reply(ctx.i18n.t('video_download_error'), {
       reply_to_message_id: ctx.message.message_id,
     })

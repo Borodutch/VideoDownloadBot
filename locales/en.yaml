@@ -7,3 +7,8 @@ invalid_url: I couldn't find a video with that link.
 video_download_error: Could not download the video.
 select_format: Select the format and the quality of the file.
 megabytes: Mb
+downloading: Downloading...
+still_downloading: Still downloading, be patient, I'll show you an error if something breaks...
+download_complete: 🎉 Download complete!
+video_caption: Downloaded with @${bot} powered by <a href="https://todorant.com">Todorant</a>
+already_downloading: The file is already being downloaded.

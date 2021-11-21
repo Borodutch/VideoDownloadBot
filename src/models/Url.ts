@@ -26,8 +26,8 @@ const UrlModel = getModelForClass(Url, {
   schemaOptions: { timestamps: true },
 })
 
-export function findUrl(url: string) {
-  return UrlModel.findOne({ url })
+export function findUrl(url: string, formatId: string) {
+  return UrlModel.findOne({ url, formatId })
 }
 
 export function findOrCreateUrl(url: string, video: Video, formatId: string) {

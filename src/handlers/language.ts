@@ -12,6 +12,7 @@ export function sendLanguage(ctx: Context) {
 }
 
 export async function setLanguage(ctx: Context) {
+  await ctx.answerCallbackQuery()
   if (!ctx.callbackQuery.data) {
     return
   }

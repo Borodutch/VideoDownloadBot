@@ -11,7 +11,8 @@
       "@/*": ["*"]
     },
     "emitDecoratorMetadata": true,
-    "experimentalDecorators": true
+    "experimentalDecorators": true,
+    "useUnknownInCatchVariables": true
   },
   "include": ["src/**/*"]
 }

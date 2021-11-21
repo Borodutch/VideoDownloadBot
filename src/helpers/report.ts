@@ -1,7 +1,7 @@
 import Context from '@/models/Context'
 import bot from '@/helpers/bot'
 
-const ignoredMessages = []
+const ignoredMessages = [] as string[]
 
 interface ExtraErrorInfo {
   ctx?: Context
@@ -46,8 +46,12 @@ async function sendToTelegramAdmin(error: Error, info: ExtraErrorInfo) {
   }
 }
 
-export default function report(error: Error, info: ExtraErrorInfo = {}) {
-  void sendToTelegramAdmin(error, info)
+export default function report(error: unknown, info: ExtraErrorInfo = {}) {
+  if (error instanceof Error) {
+    void sendToTelegramAdmin(error, info)
+  } else if (typeof error === 'string') {
+    void sendToTelegramAdmin(new Error(error), info)
+  }
 }
 
 function escape(s: string) {
