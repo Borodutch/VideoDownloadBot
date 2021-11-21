@@ -15,6 +15,7 @@ import handleSelectFormat from '@/handlers/handleSelectFormat'
 import handleUrl from '@/handlers/handleUrl'
 import i18n from '@/helpers/i18n'
 import ignoreOldMessageUpdates from '@/middlewares/ignoreOldMessageUpdates'
+import report from '@/helpers/report'
 import sendHelp from '@/handlers/sendHelp'
 import sequentialize from '@/middlewares/sequentialize'
 import startMongo from '@/helpers/startMongo'
@@ -42,7 +43,9 @@ async function runApp() {
   bot.callbackQuery(localeActions, setLanguage)
   bot.callbackQuery(/.+~.+/, handleSelectFormat)
   // Errors
-  bot.catch(console.error)
+  bot.catch((botError) => {
+    report(botError.error, { ctx: botError.ctx })
+  })
   // Start bot
   await bot.init()
   run(bot)
