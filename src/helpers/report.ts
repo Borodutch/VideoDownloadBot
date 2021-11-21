@@ -14,7 +14,9 @@ function constructErrorMessage(
   { ctx, location, meta }: ExtraErrorInfo
 ) {
   const { message } = error
-  const chatInfo = ctx ? [`Chat <b>${ctx.chat.id}</b>`] : []
+  const chatInfo = ctx
+    ? [`Chat <b>${ctx.chat?.id || ctx.callbackQuery.message.chat.id}</b>`]
+    : []
   if (ctx && 'username' in ctx.chat) {
     chatInfo.push(`@${ctx.chat.username}`)
   }

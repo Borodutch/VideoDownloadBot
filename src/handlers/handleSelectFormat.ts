@@ -28,9 +28,11 @@ export default async function handleSelectFormat(ctx: Context) {
     // Make user know that the file is being downloaded
     await ctx.editMessageText(ctx.i18n.t('downloading'))
     const data = ctx.callbackQuery.data.split('~')
-    const { formatId, formatName } = await ShortFormatModel.findOne({
+    const shortFormat = await ShortFormatModel.findOne({
       shortId: data[0],
     })
+    formatId = shortFormat.formatId
+    const formatName = shortFormat.formatName
     url = (await ShortUrlModel.findOne({ shortId: data[1] })).url
     // Create caption
     const caption = ctx.i18n.t('video_caption', {
@@ -97,7 +99,16 @@ export default async function handleSelectFormat(ctx: Context) {
   } catch (error) {
     errorEncountered = true
     // Report the error to the admin
-    report(error, { ctx, location: 'handleSelectFormat' })
+    report(error, {
+      ctx,
+      location: 'handleSelectFormat',
+      meta: JSON.stringify({
+        formatId,
+        url,
+        created,
+        errorEncountered,
+      }),
+    })
     try {
       // Report the error to the user
       await ctx.editMessageText(ctx.i18n.t('error'))
