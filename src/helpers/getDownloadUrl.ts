@@ -22,7 +22,6 @@ export default async function getDownloadUrl(
         : 'bestvideo[protocol!*=?m3u8_native]/bestaudio[protocol!*=?m3u8_native]'
       : undefined,
   })
-  console.log(videoInfo.url, videoInfo.requested_formats)
   const chosenFormat: Format = formatId
     ? videoInfo.formats.find((format) => format.format_id === formatId)
     : videoInfo.requested_formats

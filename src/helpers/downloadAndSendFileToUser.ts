@@ -102,7 +102,6 @@ export default async function downloadAndSendFileToUser({
         return
       }
     }
-    console.log(downloadInfo.downloadUrl)
     const inputFile = new InputFile({ url: downloadInfo.downloadUrl })
     const config = {
       reply_to_message_id: messageId,
