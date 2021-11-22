@@ -23,7 +23,7 @@ function constructErrorMessage(
   const result = `${
     location ? `<b>${escape(location)}</b>${ctx ? '\n' : ''}` : ''
   }${chatInfo.filter((v) => !!v).join(', ')}\n${escape(message)}${
-    meta ? `${meta}\n` : ''
+    meta ? `\n<code>${meta}</code>` : ''
   }`
   return result
 }

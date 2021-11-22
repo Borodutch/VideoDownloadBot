@@ -16,10 +16,8 @@ export default async function handleSelectFormat(ctx: Context) {
   const url = (await ShortUrlModel.findOne({ shortId: data[1] })).url
   const formatName = shortFormat.formatName
   return downloadAndSendFileToUser({
-    i18nContext: ctx.i18n,
     url,
     formatId,
-    chatId: ctx.dbchat.telegramId,
     messageId: ctx.callbackQuery.message.message_id,
     formatName,
     ctx,

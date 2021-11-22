@@ -1,130 +1,117 @@
-import { I18nContext, TemplateData } from '@grammyjs/i18n/dist/source'
 import { InputFile } from 'grammy'
-import {
-  deleteDownloadJob,
-  findOrCreateDownloadJob,
-} from '@/models/DownloadJob'
-import { findOrCreateUrl, findUrl } from '@/models/Url'
+import { deleteDownloadJob } from '@/models/DownloadJob'
+import { findOrCreateUrl } from '@/models/Url'
 import Context from '@/models/Context'
 import bot from '@/helpers/bot'
-import i18n from '@/helpers/i18n'
+import checkDownloadJobAndSendError from '@/helpers/checkDownloadJobAndSendError'
+import checkForCachedUrlAndSendFile from '@/helpers/checkForCachedUrlAndSendFile'
+import getCaption from '@/helpers/getCaption'
+import getDownloadUrl from '@/helpers/getDownloadUrl'
 import report from '@/helpers/report'
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const youtubedl = require('youtube-dl-exec')
 
-function t(
-  resourceKey: string,
-  templateData?: TemplateData,
-  i18nContext?: I18nContext,
-  language?: string
+async function checkCacheAndDownloadJob(
+  url: string,
+  formatId: string,
+  formatName: string,
+  ctx: Context,
+  messageId: number,
+  caption: string
 ) {
-  if (i18nContext) {
-    return i18nContext.t(resourceKey, templateData)
+  // Check cache
+  const cached = await checkForCachedUrlAndSendFile(
+    url,
+    formatId,
+    formatName,
+    ctx,
+    messageId,
+    caption
+  )
+  if (cached) {
+    return true
   }
-  return i18n.t(language, resourceKey, templateData)
+  // Check if already downloading
+  const created = await checkDownloadJobAndSendError(
+    ctx,
+    messageId,
+    url,
+    formatId
+  )
+  return !created
 }
 
 export default async function downloadAndSendFileToUser({
-  i18nContext,
-  language,
-  url,
-  formatId,
-  chatId,
-  messageId,
-  formatName,
   ctx,
+  url,
+  messageId,
+  formatId,
+  formatName,
 }: {
-  i18nContext?: I18nContext
-  language?: string
+  ctx: Context
   url: string
-  formatId: string
-  chatId: number
   messageId: number
-  formatName: string
-  ctx?: Context
+  formatId?: string
+  formatName?: string
 }) {
   // Let users know not to panic after a minute of downloading
   const stillDownloadingTimeout = setTimeout(
     () =>
       bot.api.editMessageText(
-        chatId,
+        ctx.dbchat.telegramId,
         messageId,
-        t('still_downloading', undefined, i18nContext, language)
+        ctx.i18n.t('still_downloading')
       ),
     1000 * 60 // 1 minute
   )
-  let created = false
+  let needsToDeleteDownloadJob = true
   let errorEncountered = false
   try {
     // Create caption
-    const caption = t(
-      'video_caption',
-      {
-        bot: bot.botInfo.username,
-      },
-      i18nContext,
-      language
-    )
-    // Find url in cache, if it exists, send it instead
-    const cachedUrl = await findUrl(url, formatId)
-    if (cachedUrl) {
-      await bot.api.editMessageText(
-        chatId,
+    const caption = getCaption(ctx)
+    // In case format id is known, check for cache and download job
+    if (formatId) {
+      const needsToReturn = await checkCacheAndDownloadJob(
+        url,
+        formatId,
+        formatName,
+        ctx,
         messageId,
-        t('download_complete', undefined, i18nContext, language)
+        caption
       )
-      const config = {
-        reply_to_message_id: messageId,
-        caption,
-        parse_mode: 'HTML' as const,
-      }
-      return formatName.includes('audio')
-        ? bot.api.sendAudio(chatId, cachedUrl.fileId, config)
-        : bot.api.sendVideo(chatId, cachedUrl.fileId, config)
-    }
-    const findOrCreateResult = await findOrCreateDownloadJob(
-      chatId,
-      messageId,
-      url,
-      formatId
-    )
-    created = findOrCreateResult.created
-    const downloadJob = findOrCreateResult.doc
-    if (!created) {
-      if (downloadJob.messageId === messageId) {
+      if (needsToReturn) {
+        needsToDeleteDownloadJob = false
         return
       }
-      return bot.api.editMessageText(
-        chatId,
+    }
+    // Get the video info
+    const downloadInfo = await getDownloadUrl(url, ctx, formatId)
+    if (!formatId) {
+      // Set default values
+      formatId = downloadInfo.formatId
+      formatName = downloadInfo.formatName
+      // Check cache and running download job with the default values
+      const needsToReturn = await checkCacheAndDownloadJob(
+        url,
+        formatId,
+        formatName,
+        ctx,
         messageId,
-        t('error_already_in_progress', undefined, i18nContext, language)
+        caption
       )
+      if (needsToReturn) {
+        needsToDeleteDownloadJob = false
+        return
+      }
     }
-    console.log(`format_id=${formatId}`)
-    // Get the video info again
-    const videoInfo = await youtubedl(url, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      noCheckCertificate: true,
-      youtubeSkipDashManifest: true,
-      skipDownload: true,
-      format: `format_id=${formatId}`,
-    })
-    const chosenFormat = videoInfo.formats.find(
-      (format) => format.format_id === formatId
-    )
-    if (!chosenFormat) {
-      throw new Error(`Chosen format ${formatId} does not exist at url ${url}`)
-    }
-    const inputFile = new InputFile({ url: chosenFormat.url })
+    console.log(downloadInfo.downloadUrl)
+    const inputFile = new InputFile({ url: downloadInfo.downloadUrl })
     const config = {
       reply_to_message_id: messageId,
       caption,
       parse_mode: 'HTML' as const,
     }
     const sentMessage = formatName.includes('audio')
-      ? await bot.api.sendAudio(chatId, inputFile, config)
-      : await bot.api.sendVideo(chatId, inputFile, config)
+      ? await bot.api.sendAudio(ctx.dbchat.telegramId, inputFile, config)
+      : await bot.api.sendVideo(ctx.dbchat.telegramId, inputFile, config)
     const fileId =
       ('video' in sentMessage && sentMessage.video.file_id) ||
       ('audio' in sentMessage && sentMessage.audio?.file_id)
@@ -132,9 +119,9 @@ export default async function downloadAndSendFileToUser({
     await findOrCreateUrl(url, fileId, formatId, formatName)
     // Edit the "downloading" message
     await bot.api.editMessageText(
-      chatId,
+      ctx.dbchat.telegramId,
       messageId,
-      t('download_complete', undefined, i18nContext, language)
+      ctx.i18n.t('download_complete')
     )
   } catch (error) {
     errorEncountered = true
@@ -145,15 +132,19 @@ export default async function downloadAndSendFileToUser({
       meta: JSON.stringify({
         formatId,
         url,
-        created,
+        needsToDeleteDownloadJob,
         errorEncountered,
       }),
     })
     try {
       // Report the error to the user
-      await ctx.editMessageText(ctx.i18n.t('error'))
+      await bot.api.editMessageText(
+        ctx.dbchat.telegramId,
+        messageId,
+        ctx.i18n.t('error')
+      )
       await ctx.reply(ctx.i18n.t('error_message'), {
-        reply_to_message_id: ctx.callbackQuery.message.message_id,
+        reply_to_message_id: messageId,
       })
     } catch (error) {
       report(error, {
@@ -165,7 +156,7 @@ export default async function downloadAndSendFileToUser({
     // No need to change the message so that user wouldn't panic anymore
     clearTimeout(stillDownloadingTimeout)
     // Remove the download job
-    if ((created || errorEncountered) && url && formatId) {
+    if ((needsToDeleteDownloadJob || errorEncountered) && url && formatId) {
       await deleteDownloadJob(ctx.dbchat.telegramId, url, formatId)
     }
   }
