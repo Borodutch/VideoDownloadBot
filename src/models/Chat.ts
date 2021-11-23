@@ -5,13 +5,13 @@ import { getModelForClass, plugin, prop } from '@typegoose/typegoose'
 @plugin(findorcreate)
 export class Chat extends FindOrCreate {
   @prop({ required: true, index: true, unique: true })
-  telegramId: number
+  telegramId!: number
   @prop({ required: true, default: 'en' })
-  language: string
+  language!: string
   @prop({ required: true, default: false })
-  audio: boolean
+  audio!: boolean
   @prop({ required: true, default: false })
-  chooseFormats: boolean
+  chooseFormats!: boolean
 }
 
 const ChatModel = getModelForClass(Chat, {

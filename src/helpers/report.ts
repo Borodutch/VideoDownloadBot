@@ -14,10 +14,11 @@ function constructErrorMessage(
   { ctx, location, meta }: ExtraErrorInfo
 ) {
   const { message } = error
-  const chatInfo = ctx
-    ? [`Chat <b>${ctx.chat?.id || ctx.callbackQuery.message.chat.id}</b>`]
-    : []
-  if (ctx && 'username' in ctx.chat) {
+  const chatInfo =
+    ctx?.chat?.id || ctx?.callbackQuery?.message?.chat.id
+      ? [`Chat <b>${ctx.chat?.id || ctx.callbackQuery?.message?.chat.id}</b>`]
+      : []
+  if (ctx?.chat && 'username' in ctx.chat) {
     chatInfo.push(`@${ctx.chat.username}`)
   }
   const result = `${
@@ -29,6 +30,10 @@ function constructErrorMessage(
 }
 
 async function sendToTelegramAdmin(error: Error, info: ExtraErrorInfo) {
+  if (!process.env.ADMIN_ID) {
+    console.log(`ADMIN_ID is not defined`)
+    return
+  }
   try {
     if (
       process.env.ENVIRONMENT !== 'development' &&

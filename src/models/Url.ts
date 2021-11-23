@@ -5,28 +5,21 @@ import { getModelForClass, plugin, prop } from '@typegoose/typegoose'
 @plugin(findorcreate)
 export class Url extends FindOrCreate {
   @prop({ required: true, index: true })
-  url: string
+  url!: string
   @prop({ required: true, index: true })
-  formatId: string
-  @prop({ required: true, index: true })
-  fileId: string
-  @prop({ required: true })
-  formatName: string
+  fileId!: string
+  @prop({ required: true, index: true, default: false })
+  audio!: boolean
 }
 
 const UrlModel = getModelForClass(Url, {
   schemaOptions: { timestamps: true },
 })
 
-export function findUrl(url: string, formatId: string) {
-  return UrlModel.findOne({ url, formatId })
+export function findUrl(url: string, audio: boolean) {
+  return UrlModel.findOne({ url, audio })
 }
 
-export function findOrCreateUrl(
-  url: string,
-  fileId: string,
-  formatId: string,
-  formatName: string
-) {
-  return UrlModel.findOrCreate({ url, formatId }, { fileId, formatName })
+export function findOrCreateUrl(url: string, fileId: string, audio: boolean) {
+  return UrlModel.findOrCreate({ url, audio }, { fileId })
 }

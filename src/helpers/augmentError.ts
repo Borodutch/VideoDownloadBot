@@ -1,4 +1,8 @@
-export default function augmentError(error: Error, augmentation: string) {
-  error.message = `${augmentation}, ${error.message}`
+export default function augmentError(error: unknown, augmentation: string) {
+  if (error instanceof Error) {
+    error.message = `${error.message}, ${augmentation}`
+  } else {
+    error = `${error}, ${augmentation}`
+  }
   return error
 }

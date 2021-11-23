@@ -1,33 +1,25 @@
 import { findUrl } from '@/models/Url'
 import Context from '@/models/Context'
+import MessageEditor from '@/helpers/MessageEditor'
 import bot from '@/helpers/bot'
+import getCaption from '@/helpers/getCaption'
 
 export default async function checkForCachedUrlAndSendFile(
   url: string,
-  formatId: string,
-  formatName: string,
   ctx: Context,
-  messageId: number,
-  caption: string
+  editor: MessageEditor
 ) {
-  const cachedUrl = await findUrl(url, formatId)
+  const cachedUrl = await findUrl(url, ctx.dbchat.audio)
   if (cachedUrl) {
-    await bot.api.editMessageText(
-      ctx.dbchat.telegramId,
-      messageId,
-      ctx.i18n.t('download_complete')
-    )
+    await editor.editMessageAndStopTimer('download_complete')
     const config = {
-      reply_to_message_id: messageId,
-      caption,
+      reply_to_message_id: editor.messageId,
+      caption: getCaption(ctx),
       parse_mode: 'HTML' as const,
     }
-    if (formatName.includes('audio')) {
-      await bot.api.sendAudio(ctx.dbchat.telegramId, cachedUrl.fileId, config)
-    } else {
-      await bot.api.sendVideo(ctx.dbchat.telegramId, cachedUrl.fileId, config)
-    }
-    return true
+    return ctx.dbchat.audio
+      ? bot.api.sendAudio(ctx.dbchat.telegramId, cachedUrl.fileId, config)
+      : bot.api.sendVideo(ctx.dbchat.telegramId, cachedUrl.fileId, config)
   }
-  return false
+  return undefined
 }

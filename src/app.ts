@@ -13,14 +13,14 @@ import bot from '@/helpers/bot'
 import cleanupDownloadJobs from '@/helpers/cleanupDownloadJobs'
 import configureI18n from '@/middlewares/configureI18n'
 import handleAudio from '@/handlers/handleAudio'
-import handleChooseFormats from '@/handlers/handleChooseFormats'
-import handleSelectFormat from '@/handlers/handleSelectFormat'
 import handleUrl from '@/handlers/handleUrl'
 import i18n from '@/helpers/i18n'
 import ignoreOldMessageUpdates from '@/middlewares/ignoreOldMessageUpdates'
 import report from '@/helpers/report'
 import sendHelp from '@/handlers/sendHelp'
 import startMongo from '@/helpers/startMongo'
+
+// Todo: allow chats to share download jobs
 
 async function runApp() {
   console.log('Starting app...')
@@ -38,7 +38,6 @@ async function runApp() {
   bot.command(['help', 'start'], sendHelp)
   bot.command('language', sendLanguage)
   bot.command('audio', handleAudio)
-  bot.command('chooseFormats', handleChooseFormats)
   // Handlers
   bot.hears(
     /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i,
@@ -46,7 +45,6 @@ async function runApp() {
   )
   // Actions
   bot.callbackQuery(localeActions, setLanguage)
-  bot.callbackQuery(/.+~.+/, handleSelectFormat)
   // Catch all
   bot.use(sendHelp)
   // Errors
