@@ -9,7 +9,7 @@ export default async function handleUrl(ctx: Context) {
       /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i
     )
     if (!match || !match[0]) {
-      return ctx.reply(ctx.i18n.t('invalid_url'), {
+      return ctx.reply(ctx.i18n.t('error_invalid_url'), {
         reply_to_message_id: ctx.message?.message_id,
       })
     }

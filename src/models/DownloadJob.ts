@@ -2,14 +2,19 @@ import * as findorcreate from 'mongoose-findorcreate'
 import { FindOrCreate } from '@typegoose/typegoose/lib/defaultClasses'
 import { isDocument, plugin, post, prop } from '@typegoose/typegoose'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
+import report from '@/helpers/report'
 import updateDownloadRequests from '@/helpers/updateDownloadRequests'
 
 @plugin(findorcreate)
-@post<DownloadJob>('save', function (downloadJob) {
+@post<DownloadJob>('save', async function (downloadJob) {
   if (!isDocument(downloadJob)) {
     return
   }
-  return updateDownloadRequests(downloadJob)
+  try {
+    await updateDownloadRequests(downloadJob)
+  } catch (error) {
+    report(error, { location: 'DownloadJob.save hook' })
+  }
 })
 export default class DownloadJob extends FindOrCreate {
   @prop({ required: true, index: true })
