@@ -25,4 +25,4 @@ error_invalid_url: 😱 I couldn't find a video with that link.
 error_cache_or_download_job: 😱 I couldn't get the video from cache or create a download job for it.
 error_video_download: 😱 I couldn't download the video.
 error_video_upload: 😱 I couldn't upload the video.
-error_reboot: 😱 The server rebooted, while I was working on the file. Please, try again later.
+error_reboot: 😱 The server rebooted, while I was working on the file. Please, try again!
