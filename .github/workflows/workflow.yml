@@ -1,4 +1,4 @@
-name: Dosu Backend
+name: Check code
 
 on:
   pull_request:
