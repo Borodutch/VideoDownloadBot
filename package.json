@@ -14,6 +14,7 @@
     "lint": "yarn pretty && eslint --max-warnings 0 --ext ts,tsx,json src"
   },
   "dependencies": {
+    "@borodutch-labs/yt-dlp-exec": "2.0.0",
     "@grammyjs/i18n": "^0.3.0",
     "@grammyjs/runner": "^1.0.2",
     "@typegoose/typegoose": "^9.2.0",
@@ -22,8 +23,7 @@
     "mongoose": "^6.0.13",
     "mongoose-findorcreate": "^3.0.0",
     "random-token": "^0.0.8",
-    "uuid": "^8.3.2",
-    "youtube-dl-exec": "^2.0.0"
+    "uuid": "^8.3.2"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.5",
