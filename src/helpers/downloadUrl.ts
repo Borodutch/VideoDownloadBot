@@ -30,7 +30,7 @@ export default async function downloadUrl(
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
-      output: `/var/tmp/${fileUuid}.%(ext)s`,
+      output: `/var/tmp/video-download-bot/${fileUuid}.%(ext)s`,
       mergeOutputFormat: 'mp4',
       noCacheDir: true,
       rmCacheDir: true,
@@ -38,7 +38,9 @@ export default async function downloadUrl(
     const downloadedFileInfo = await youtubedl(downloadJob.url, config)
     const { title, ext }: { title: string; ext: string } = downloadedFileInfo
     const escapedTitle = title.replace('<', '&lt;').replace('>', '&gt;')
-    const filePath = `/var/tmp/${fileUuid}.${downloadJob.audio ? ext : 'mp4'}`
+    const filePath = `/var/tmp/video-download-bot/${fileUuid}.${
+      downloadJob.audio ? ext : 'mp4'
+    }`
     await youtubedl(downloadJob.url, omit(config, 'dumpSingleJson'))
     // Upload
     downloadJob.status = DownloadJobStatus.uploading
