@@ -11,8 +11,9 @@ import i18n from '@/helpers/i18n'
 export default async function updateDownloadRequests(
   downloadJob: DocumentType<DownloadJob>
 ) {
-  // Todo: handle errors
+  // Todo: handle errors here in try/catch
   // Todo: add messages updates for download jobs
+  // Todo: handle error DownloadJobStatus
   if (downloadJob.status === DownloadJobStatus.downloading) {
     return
   }
