@@ -6,33 +6,37 @@ export default class MessageEditor {
   private timer?: NodeJS.Timer
 
   constructor(
-    private ctx: Context,
     public messageId: number,
-    private messageLocalizationKeys: string[] = [],
+    private ctx?: Context,
+    public chatId?: number,
+    private messages: string[] = [],
     private interval: number = 60
   ) {
     this.startEditing()
   }
 
+  private get safeChatId() {
+    return this.ctx?.dbchat.telegramId || this.chatId
+  }
+
   private startEditing() {
-    if (!this.messageLocalizationKeys.length) {
+    if (!this.messages.length) {
       return
     }
     this.timer = setInterval(() => this.updateMessage(), this.interval * 1000)
   }
 
   private async updateMessage() {
-    const messageLocalizationKey = this.messageLocalizationKeys.shift()
-    if (!messageLocalizationKey) {
+    const message = this.messages.shift()
+    if (!message) {
       this.stopEditting()
       return
     }
     try {
-      await bot.api.editMessageText(
-        this.ctx.dbchat.telegramId,
-        this.messageId,
-        this.ctx.i18n.t(messageLocalizationKey)
-      )
+      if (!this.safeChatId) {
+        return
+      }
+      await bot.api.editMessageText(this.safeChatId, this.messageId, message)
     } catch (error) {
       report(error, { ctx: this.ctx, location: 'MessageEditor.updateMessage' })
     }
@@ -46,20 +50,19 @@ export default class MessageEditor {
     this.timer = undefined
   }
 
-  changeMessages(messageLocalizationKeys: string[]) {
+  changeMessages(messages: string[]) {
     this.stopEditting()
-    this.messageLocalizationKeys = messageLocalizationKeys
+    this.messages = messages
     this.startEditing()
   }
 
-  async editMessageAndStopTimer(messageLocalizationKey: string) {
+  async editMessageAndStopTimer(message: string) {
     this.stopEditting()
     try {
-      await bot.api.editMessageText(
-        this.ctx.dbchat.telegramId,
-        this.messageId,
-        this.ctx.i18n.t(messageLocalizationKey)
-      )
+      if (!this.safeChatId) {
+        return
+      }
+      await bot.api.editMessageText(this.safeChatId, this.messageId, message)
     } catch (error) {
       report(error, {
         ctx: this.ctx,

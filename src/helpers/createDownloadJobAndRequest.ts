@@ -1,12 +1,13 @@
-import { findOrCreateDownloadRequest } from '@/models/DownloadRequest'
+import { findOrCreateDownloadJob } from '@/models/downloadJobFunctions'
+import { findOrCreateDownloadRequest } from '@/models/downloadRequestFunctions'
 import Context from '@/models/Context'
 import MessageEditor from '@/helpers/MessageEditor'
 import augmentError from '@/helpers/augmentError'
 import checkForCachedUrlAndSendFile from '@/helpers/checkForCachedUrlAndSendFile'
-import createDownloadJobAndStartDownload from '@/helpers/createDownloadJobAndStartDownload'
+import downloadUrl from '@/helpers/downloadUrl'
 import report from '@/helpers/report'
 
-export default async function downloadAndSendFileToUser(
+export default async function createDownloadJobAndRequest(
   ctx: Context,
   url: string
 ) {
@@ -14,7 +15,7 @@ export default async function downloadAndSendFileToUser(
     reply_to_message_id: ctx.message?.message_id,
   })
   // Create message editor
-  const downloadMessageEditor = new MessageEditor(ctx, message_id)
+  const downloadMessageEditor = new MessageEditor(message_id, ctx)
   try {
     // Check cache
     try {
@@ -32,16 +33,18 @@ export default async function downloadAndSendFileToUser(
       throw augmentError(error, 'check cache and send file')
     }
     // Create download job
-    const downloadJob = await createDownloadJobAndStartDownload(
+    const { doc, created } = await findOrCreateDownloadJob(
       url,
-      ctx.dbchat.audio
+      ctx.dbchat.audio,
+      ctx.dbchat.telegramId,
+      message_id
     )
     // Create download request
-    await findOrCreateDownloadRequest(
-      ctx.dbchat.telegramId,
-      message_id,
-      downloadJob
-    )
+    await findOrCreateDownloadRequest(ctx.dbchat.telegramId, message_id, doc)
+    // Start the download
+    if (created) {
+      return downloadUrl(doc)
+    }
   } catch (error) {
     // Report the error to the admin
     report(error, {

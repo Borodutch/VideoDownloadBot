@@ -1,11 +1,11 @@
 import {
   deleteAllDownloadJobs,
   findAllDownloadJobs,
-} from '@/models/DownloadJob'
+} from '@/models/downloadJobFunctions'
 import {
   deleteAllDownloadRequests,
   findDownloadRequestsForDownloadJob,
-} from '@/models/DownloadRequest'
+} from '@/models/downloadRequestFunctions'
 import { findOrCreateChat } from '@/models/Chat'
 import bot from '@/helpers/bot'
 import i18n from '@/helpers/i18n'

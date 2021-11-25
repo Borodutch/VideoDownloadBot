@@ -15,9 +15,12 @@ audio_off: 🎥 I will not convert all files to audio-only automatically.
 download_started: 😍 Downloading...
 downloading_messages:
   - 🤔 Still downloading, be patient, I'll show you an error if something breaks...
+uploading_started: 🤘 Uploading...
 download_complete: 🎉 Download complete!
 # Caption for completed video
-video_caption: Downloaded with @${bot} powered by <a href="https://todorant.com">Todorant</a>
+video_caption: |
+  <b>${title}</b>
+  Downloaded with @${bot} powered by <a href="https://todorant.com">Todorant</a>
 # Errors
 error_cannot_start_download: 😱 I couldn't start the download.
 error_invalid_url: 😱 I couldn't find a video with that link.

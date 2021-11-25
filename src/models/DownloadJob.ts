@@ -1,22 +1,17 @@
 import * as findorcreate from 'mongoose-findorcreate'
 import { FindOrCreate } from '@typegoose/typegoose/lib/defaultClasses'
-import { getModelForClass, plugin, post, prop } from '@typegoose/typegoose'
+import { isDocument, plugin, post, prop } from '@typegoose/typegoose'
+import DownloadJobStatus from '@/models/DownloadJobStatus'
 import updateDownloadRequests from '@/helpers/updateDownloadRequests'
 
-export enum DownloadJobStatus {
-  start = 'start',
-  downloading = 'downloading',
-  uploading = 'uploading',
-  finished = 'finished',
-  failedDownload = 'failedDownload',
-  failedUpload = 'failedUpload',
-}
-
 @plugin(findorcreate)
-@post<DownloadJob>('update', function (downloadJobs) {
-  downloadJobs.forEach((downloadJob) => updateDownloadRequests(downloadJob))
+@post<DownloadJob>('save', function (downloadJob) {
+  if (!isDocument(downloadJob)) {
+    return
+  }
+  return updateDownloadRequests(downloadJob)
 })
-export class DownloadJob extends FindOrCreate {
+export default class DownloadJob extends FindOrCreate {
   @prop({ required: true, index: true })
   url!: string
   @prop({ required: true, index: true, default: false })
@@ -25,27 +20,11 @@ export class DownloadJob extends FindOrCreate {
     required: true,
     index: true,
     enum: DownloadJobStatus,
-    default: DownloadJobStatus.start,
+    default: DownloadJobStatus.downloading,
   })
   status!: DownloadJobStatus
-}
-
-const DownloadJobModel = getModelForClass(DownloadJob, {
-  schemaOptions: { timestamps: true },
-})
-
-export function findOrCreateDownloadJob(url: string, audio: boolean) {
-  return DownloadJobModel.findOrCreate({ url, audio })
-}
-
-export function deleteDownloadJob(url: string, audio: boolean) {
-  return DownloadJobModel.deleteMany({ url, audio })
-}
-
-export function findAllDownloadJobs() {
-  return DownloadJobModel.find({})
-}
-
-export function deleteAllDownloadJobs() {
-  return DownloadJobModel.deleteMany({})
+  @prop({ required: true, index: true })
+  originalChatId!: number
+  @prop({ required: true, index: true })
+  originalMessageId!: number
 }

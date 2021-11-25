@@ -130,6 +130,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/lodash@npm:^4.14.177":
+  version: 4.14.177
+  resolution: "@types/lodash@npm:4.14.177"
+  checksum: 00f9eb300ed5219cfbabb3448d4a71744895edad60dcfda9f028c0808a50eb6ad1ca9f673b56a85f85668a4ea54b9870643625468a747039c435643e52253a75
+  languageName: node
+  linkType: hard
+
 "@types/node@npm:*":
   version: 16.11.6
   resolution: "@types/node@npm:16.11.6"
@@ -141,6 +148,13 @@ __metadata:
   version: 16.11.9
   resolution: "@types/node@npm:16.11.9"
   checksum: baec2e6471ee58fd1e9874e6f47ab95a918a0f46b42424392e4c13e3e07f078f8b72b6b48073b0b14f710ed66c5f1b2e497df43f28151000f11f5f299382cfe2
+  languageName: node
+  linkType: hard
+
+"@types/uuid@npm:^8.3.3":
+  version: 8.3.3
+  resolution: "@types/uuid@npm:8.3.3"
+  checksum: 3f340155bb1161f9ffa7163926d6222fea8f3505c23619b72bcc230883354926672c08a06510c7a543f73553c792a84444cc1744cff631b4ba988763e4bd7a8f
   languageName: node
   linkType: hard
 
@@ -1461,7 +1475,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"lodash@npm:^4.17.20":
+"lodash@npm:^4.17.20, lodash@npm:^4.17.21":
   version: 4.17.21
   resolution: "lodash@npm:4.17.21"
   checksum: eb835a2e51d381e561e508ce932ea50a8e5a68f4ebdd771ea240d3048244a8d13658acbd502cd4829768c56f2e16bdd4340b9ea141297d472517b83868e677f7
@@ -2301,6 +2315,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"uuid@npm:^8.3.2":
+  version: 8.3.2
+  resolution: "uuid@npm:8.3.2"
+  bin:
+    uuid: dist/bin/uuid
+  checksum: 5575a8a75c13120e2f10e6ddc801b2c7ed7d8f3c8ac22c7ed0c7b2ba6383ec0abda88c905085d630e251719e0777045ae3236f04c812184b7c765f63a70e58df
+  languageName: node
+  linkType: hard
+
 "v8-compile-cache@npm:^2.0.3":
   version: 2.3.0
   resolution: "v8-compile-cache@npm:2.3.0"
@@ -2316,7 +2339,9 @@ __metadata:
     "@grammyjs/runner": ^1.0.2
     "@typegoose/typegoose": ^9.2.0
     "@types/js-yaml": ^4.0.5
+    "@types/lodash": ^4.14.177
     "@types/node": ^16.11.9
+    "@types/uuid": ^8.3.3
     "@typescript-eslint/eslint-plugin": ^5.4.0
     "@typescript-eslint/parser": ^5.4.0
     dotenv: ^10.0.0
@@ -2327,6 +2352,7 @@ __metadata:
     eslint-plugin-prettier: ^4.0.0
     eslint-plugin-sort-imports-es6-autofix: ^0.6.0
     grammy: ^1.4.2
+    lodash: ^4.17.21
     module-alias: ^2.2.2
     mongoose: ^6.0.13
     mongoose-findorcreate: ^3.0.0
@@ -2334,6 +2360,7 @@ __metadata:
     random-token: ^0.0.8
     tsc-watch: ^4.5.0
     typescript: ^4.5.2
+    uuid: ^8.3.2
     youtube-dl-exec: ^2.0.0
   languageName: unknown
   linkType: soft

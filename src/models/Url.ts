@@ -10,6 +10,8 @@ export class Url extends FindOrCreate {
   fileId!: string
   @prop({ required: true, index: true, default: false })
   audio!: boolean
+  @prop({ required: true })
+  title!: string
 }
 
 const UrlModel = getModelForClass(Url, {
@@ -20,6 +22,11 @@ export function findUrl(url: string, audio: boolean) {
   return UrlModel.findOne({ url, audio })
 }
 
-export function findOrCreateUrl(url: string, fileId: string, audio: boolean) {
-  return UrlModel.findOrCreate({ url, audio }, { fileId })
+export function findOrCreateUrl(
+  url: string,
+  fileId: string,
+  audio: boolean,
+  title: string
+) {
+  return UrlModel.findOrCreate({ url, audio }, { fileId, title })
 }

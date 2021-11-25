@@ -1,5 +1,5 @@
 import Context from '@/models/Context'
-import downloadAndSendFileToUser from '@/helpers/downloadAndSendFileToUser'
+import createDownloadJobAndRequest from '@/helpers/createDownloadJobAndRequest'
 import report from '@/helpers/report'
 
 export default async function handleUrl(ctx: Context) {
@@ -14,7 +14,7 @@ export default async function handleUrl(ctx: Context) {
       })
     }
     const url = match[0]
-    return downloadAndSendFileToUser(ctx, url)
+    return createDownloadJobAndRequest(ctx, url)
   } catch (error) {
     report(error, { ctx, location: 'handleUrl' })
     return ctx.reply(ctx.i18n.t('error_cannot_start_download'), {

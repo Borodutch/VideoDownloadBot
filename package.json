@@ -18,14 +18,18 @@
     "@grammyjs/runner": "^1.0.2",
     "@typegoose/typegoose": "^9.2.0",
     "grammy": "^1.4.2",
+    "lodash": "^4.17.21",
     "mongoose": "^6.0.13",
     "mongoose-findorcreate": "^3.0.0",
     "random-token": "^0.0.8",
+    "uuid": "^8.3.2",
     "youtube-dl-exec": "^2.0.0"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.5",
+    "@types/lodash": "^4.14.177",
     "@types/node": "^16.11.9",
+    "@types/uuid": "^8.3.3",
     "@typescript-eslint/eslint-plugin": "^5.4.0",
     "@typescript-eslint/parser": "^5.4.0",
     "dotenv": "^10.0.0",
