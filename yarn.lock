@@ -5,6 +5,19 @@ __metadata:
   version: 5
   cacheKey: 8
 
+"@borodutch-labs/yt-dlp-exec@npm:2.0.0":
+  version: 2.0.0
+  resolution: "@borodutch-labs/yt-dlp-exec@npm:2.0.0"
+  dependencies:
+    dargs: ~7.0.0
+    execa: ~5.1.0
+    is-unix: ~2.0.1
+    mkdirp: ~1.0.4
+    node-fetch: ~2.6.5
+  checksum: 19d7c7ee1f32a3d99670c80968a185f08191ccd5cb6ecf5c917eee5175812bd8a888c399813c10a848b1949bdb6ea12f6f3069cf997d2eaec8be2ac30a319e41
+  languageName: node
+  linkType: hard
+
 "@eslint/eslintrc@npm:^1.0.4":
   version: 1.0.4
   resolution: "@eslint/eslintrc@npm:1.0.4"
@@ -2335,6 +2348,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "video-download-bot@workspace:."
   dependencies:
+    "@borodutch-labs/yt-dlp-exec": 2.0.0
     "@grammyjs/i18n": ^0.3.0
     "@grammyjs/runner": ^1.0.2
     "@typegoose/typegoose": ^9.2.0
@@ -2361,7 +2375,6 @@ __metadata:
     tsc-watch: ^4.5.0
     typescript: ^4.5.2
     uuid: ^8.3.2
-    youtube-dl-exec: ^2.0.0
   languageName: unknown
   linkType: soft
 
@@ -2441,18 +2454,5 @@ __metadata:
   version: 4.0.0
   resolution: "yallist@npm:4.0.0"
   checksum: 343617202af32df2a15a3be36a5a8c0c8545208f3d3dfbc6bb7c3e3b7e8c6f8e7485432e4f3b88da3031a6e20afa7c711eded32ddfb122896ac5d914e75848d5
-  languageName: node
-  linkType: hard
-
-"youtube-dl-exec@npm:^2.0.0":
-  version: 2.0.0
-  resolution: "youtube-dl-exec@npm:2.0.0"
-  dependencies:
-    dargs: ~7.0.0
-    execa: ~5.1.0
-    is-unix: ~2.0.1
-    mkdirp: ~1.0.4
-    node-fetch: ~2.6.5
-  checksum: f64ebcfeb6fee45f5d9b1a2e6da9dffbe1cf882ee4a267f0834bd0a62a6e42ab4358c300926a10e4268aafe5723c4049c989514d4fa851091bedee6ee054acde
   languageName: node
   linkType: hard

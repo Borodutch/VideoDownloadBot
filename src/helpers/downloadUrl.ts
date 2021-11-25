@@ -10,7 +10,7 @@ import DownloadJobStatus from '@/models/DownloadJobStatus'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const youtubedl = require('youtube-dl-exec')
+const youtubedl = require('@borodutch-labs/yt-dlp-exec')
 
 export default async function downloadUrl(
   downloadJob: DocumentType<DownloadJob>
