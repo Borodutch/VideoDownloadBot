@@ -9,6 +9,7 @@ import MessageEditor from '@/helpers/MessageEditor'
 import bot from '@/helpers/bot'
 import i18n from '@/helpers/i18n'
 import report from '@/helpers/report'
+import sendCompletedFile from '@/helpers/sendCompletedFile'
 
 type ChatMap = { [chatId: number]: Chat }
 
@@ -63,18 +64,15 @@ async function sendFileToNonOriginalRequests(
   }
   for (const request of otherRequests) {
     const chat = chats[request.chatId]
-    const config = {
-      reply_to_message_id: request.messageId,
-      caption: i18n.t(chat.language, 'video_caption', {
-        bot: bot.botInfo.username,
-        title: cachedUrl.title,
-      }),
-      parse_mode: 'HTML' as const,
-    }
     try {
-      downloadJob.audio
-        ? await bot.api.sendAudio(request.chatId, cachedUrl.fileId, config)
-        : await bot.api.sendVideo(request.chatId, cachedUrl.fileId, config)
+      await sendCompletedFile(
+        request.chatId,
+        request.messageId,
+        chat.language,
+        downloadJob.audio,
+        cachedUrl.title,
+        cachedUrl.fileId
+      )
     } catch (error) {
       report(error, { location: 'sendFileToNonOriginalRequests' })
     }
@@ -85,8 +83,18 @@ async function deleteDocuments(
   downloadJob: DocumentType<DownloadJob>,
   requests: DocumentType<DownloadRequest>[]
 ) {
-  await Promise.all(requests.map((request) => request.delete()))
-  await downloadJob.delete()
+  for (const request of requests) {
+    try {
+      await request.delete()
+    } catch (error) {
+      report(error, { location: 'deleteDocuments.request' })
+    }
+  }
+  try {
+    await downloadJob.delete()
+  } catch (error) {
+    report(error, { location: 'deleteDocuments.job' })
+  }
 }
 
 export default async function updateDownloadRequests(

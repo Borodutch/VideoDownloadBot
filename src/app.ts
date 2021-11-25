@@ -20,8 +20,6 @@ import report from '@/helpers/report'
 import sendHelp from '@/handlers/sendHelp'
 import startMongo from '@/helpers/startMongo'
 
-// Todo: allow chats to share download jobs
-
 async function runApp() {
   console.log('Starting app...')
   // Mongo
