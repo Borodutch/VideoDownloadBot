@@ -24,7 +24,9 @@ export default async function downloadUrl(
       noCheckCertificate: true,
       youtubeSkipDashManifest: true,
       noPlaylist: true,
-      format: downloadJob.audio ? 'bestaudio' : 'bestvideo+bestaudio/bestaudio',
+      format: downloadJob.audio
+        ? 'bestaudio'
+        : 'bestvideo+bestaudio/bestvideo/best/bestaudio',
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
