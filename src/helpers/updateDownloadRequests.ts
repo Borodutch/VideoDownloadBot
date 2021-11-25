@@ -38,9 +38,7 @@ async function updateMessages(
   for (const editor of editors) {
     const chat = editor.chatId && chats[editor.chatId]
     if (chat) {
-      await editor.editMessageAndStopTimer(
-        i18n.t(chat.language, localizationKey)
-      )
+      await editor.editMessage(i18n.t(chat.language, localizationKey))
     }
   }
 }

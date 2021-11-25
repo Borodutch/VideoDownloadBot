@@ -55,8 +55,8 @@ export default async function createDownloadJobAndRequest(
       }),
     })
     try {
-      await downloadMessageEditor.editMessageAndStopTimer(
-        'error_cache_or_download_job'
+      await downloadMessageEditor.editMessage(
+        ctx.i18n.t('error_cache_or_download_job')
       )
     } catch (error) {
       report(error, {

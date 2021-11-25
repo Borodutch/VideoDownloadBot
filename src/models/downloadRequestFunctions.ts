@@ -23,28 +23,20 @@ export async function findOrCreateDownloadRequest(
   const { doc } = await findOrCreateChat(chatId)
   switch (downloadJob.status) {
     case DownloadJobStatus.uploading:
-      await editor.editMessageAndStopTimer(
-        i18n.t(doc.language, 'uploading_started')
-      )
+      await editor.editMessage(i18n.t(doc.language, 'uploading_started'))
       break
     case DownloadJobStatus.failedDownload:
-      await editor.editMessageAndStopTimer(
-        i18n.t(doc.language, 'error_video_download')
-      )
+      await editor.editMessage(i18n.t(doc.language, 'error_video_download'))
       break
     case DownloadJobStatus.failedUpload:
-      await editor.editMessageAndStopTimer(
-        i18n.t(doc.language, 'error_video_upload')
-      )
+      await editor.editMessage(i18n.t(doc.language, 'error_video_upload'))
       break
     case DownloadJobStatus.finished: {
       const url = await findUrl(downloadJob.url, downloadJob.audio)
       if (!url) {
         throw new Error('Cached url not found')
       }
-      await editor.editMessageAndStopTimer(
-        i18n.t(doc.language, 'download_complete')
-      )
+      await editor.editMessage(i18n.t(doc.language, 'download_complete'))
       await sendCompletedFile(
         chatId,
         messageId,
