@@ -100,7 +100,6 @@ async function deleteDocuments(
 export default async function updateDownloadRequests(
   downloadJob: DocumentType<DownloadJob>
 ) {
-  // Todo: add messages updates for download jobs
   if (downloadJob.status === DownloadJobStatus.downloading) {
     return
   }
