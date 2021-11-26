@@ -8,6 +8,7 @@ const ignoredMessages = [
   'ctx.from is not defined',
   '404: Not Found',
   'bot was kicked from the supergroup chat',
+  'Bad Gateway',
 ]
 
 interface ExtraErrorInfo {
@@ -69,6 +70,6 @@ export default function report(error: unknown, info: ExtraErrorInfo = {}) {
   }
 }
 
-function escape(s: string) {
+function escape(s = '') {
   return s.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/&/g, '&amp;')
 }

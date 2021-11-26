@@ -13,7 +13,7 @@ export default async function sendCompletedFile(
   const sendDocumentConfig = {
     caption: i18n.t(language, 'video_caption', {
       bot: bot.botInfo.username,
-      title: title.replace('<', '&lt;').replace('>', '&gt;'),
+      title: (title || '').replace('<', '&lt;').replace('>', '&gt;'),
     }),
     parse_mode: 'HTML' as const,
     reply_to_message_id: messageId,

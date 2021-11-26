@@ -12,6 +12,11 @@ Bot that downloads videos and uploads the to Telegram. Originally developed by [
 
 And you should be good to go! Feel free to fork and submit pull requests. Thanks!
 
+# Requirements
+
+- You can run [telegram-bot-api](https://github.com/tdlib/telegram-bot-api) locally to increase the limits
+- You can provide login credentials for various services in `credentials.json` in the root folder, use `credentials-example.json` as a reference
+
 # Environment variables
 
 - `TOKEN` — Telegram bot token
