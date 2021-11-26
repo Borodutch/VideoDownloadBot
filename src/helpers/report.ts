@@ -1,7 +1,12 @@
 import Context from '@/models/Context'
 import bot from '@/helpers/bot'
 
-const ignoredMessages = ['bot was blocked by the user', 'is not a valid URL']
+const ignoredMessages = [
+  'bot was blocked by the user',
+  'is not a valid URL',
+  'Unsupported URL',
+  'ctx.from is not defined',
+]
 
 interface ExtraErrorInfo {
   ctx?: Context
