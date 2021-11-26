@@ -7,6 +7,8 @@ help: |
   /help — this message
   /language — change language
   /audio — convert all files to audio
+
+  Questions, feedback 👉 @borodutch_support.
 language: 😶 Please, select the language.
 language_selected: 😎 I speak English now.
 audio_on: 📣 I will convert all files to audio-only automatically.
