@@ -34,8 +34,19 @@ export default async function downloadUrl(
       mergeOutputFormat: 'mp4',
       noCacheDir: true,
     }
-    const downloadedFileInfo = await youtubedl(downloadJob.url, config)
-    const { title, ext }: { title: string; ext: string } = downloadedFileInfo
+    let downloadedFileInfo: { title: string; ext: string } | undefined
+    try {
+      downloadedFileInfo = await youtubedl(downloadJob.url, config)
+    } catch {
+      config.format = downloadJob.audio
+        ? 'bestaudio'
+        : 'best/bestvideo/bestaudio'
+      downloadedFileInfo = await youtubedl(downloadJob.url, config)
+    }
+    if (!downloadedFileInfo) {
+      throw new Error('Download failed')
+    }
+    const { title, ext } = downloadedFileInfo
     const escapedTitle = title.replace('<', '&lt;').replace('>', '&gt;')
     const filePath = `/var/tmp/video-download-bot/${fileUuid}.${
       downloadJob.audio ? ext : 'mp4'
