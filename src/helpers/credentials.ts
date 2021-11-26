@@ -10,7 +10,6 @@ export default async function credentials(url: string) {
     string,
     Record<string, string>
   >
-  console.log('credentials', credentials, url)
   if (!credentials || !Object.keys(credentials).length) {
     return {}
   }
