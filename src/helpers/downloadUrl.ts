@@ -33,7 +33,6 @@ export default async function downloadUrl(
       output: `/var/tmp/video-download-bot/${fileUuid}.%(ext)s`,
       mergeOutputFormat: 'mp4',
       noCacheDir: true,
-      rmCacheDir: true,
     }
     const downloadedFileInfo = await youtubedl(downloadJob.url, config)
     const { title, ext }: { title: string; ext: string } = downloadedFileInfo
