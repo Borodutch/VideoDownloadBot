@@ -16,6 +16,7 @@ export default async function downloadUrl(
   downloadJob: DocumentType<DownloadJob>
 ) {
   try {
+    console.log(`Downloading ${downloadJob.url}`)
     // Download
     const fileUuid = uuid()
     const config = {

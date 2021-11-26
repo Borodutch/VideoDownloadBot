@@ -10,6 +10,7 @@ export default async function checkForCachedUrlAndSendFile(
 ) {
   const cachedUrl = await findUrl(url, ctx.dbchat.audio)
   if (cachedUrl) {
+    console.log(`Sending cached file for ${url}`)
     await editor.editMessage(ctx.i18n.t('download_complete'))
     return sendCompletedFile(
       ctx.dbchat.telegramId,
