@@ -1,7 +1,7 @@
 import Context from '@/models/Context'
 import bot from '@/helpers/bot'
 
-const ignoredMessages = [] as string[]
+const ignoredMessages = ['bot was blocked by the user']
 
 interface ExtraErrorInfo {
   ctx?: Context
