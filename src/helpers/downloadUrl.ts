@@ -7,6 +7,7 @@ import { unlinkSync } from 'fs'
 import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
+import credentials from '@/helpers/credentials'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -16,13 +17,14 @@ export default async function downloadUrl(
   downloadJob: DocumentType<DownloadJob>
 ) {
   try {
-    console.log(`Downloading ${downloadJob.url}`)
+    console.log(`Downloading url ${downloadJob.url}`)
     // Download
     const tempDir =
       process.env.ENVIRONMENT === 'development'
         ? `${__dirname}/../../output`
         : '/var/tmp/video-download-bot'
     const fileUuid = uuid()
+    const credentialsForUrl = await credentials(downloadJob.url)
     const config = {
       dumpSingleJson: true,
       noWarnings: true,
@@ -38,6 +40,7 @@ export default async function downloadUrl(
       output: `${tempDir}/${fileUuid}.%(ext)s`,
       mergeOutputFormat: 'mkv',
       noCacheDir: true,
+      ...credentialsForUrl,
     }
     const downloadedFileInfo: { title: string; ext?: string } = await youtubedl(
       downloadJob.url,
