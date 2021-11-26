@@ -44,7 +44,11 @@ async function runApp() {
   // Actions
   bot.callbackQuery(localeActions, setLanguage)
   // Catch all
-  bot.use(sendHelp)
+  bot.use((ctx) => {
+    if (ctx.chat?.type === 'private') {
+      return sendHelp(ctx)
+    }
+  })
   // Errors
   bot.catch((botError) => {
     report(botError.error, { ctx: botError.ctx })

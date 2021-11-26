@@ -74,7 +74,7 @@ export default async function downloadUrl(
       downloadJob.url,
       fileId,
       downloadJob.audio,
-      escapedTitle
+      escapedTitle || 'No title'
     )
     downloadJob.status = DownloadJobStatus.finished
     await downloadJob.save()

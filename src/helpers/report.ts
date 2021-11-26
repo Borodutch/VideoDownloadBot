@@ -6,6 +6,8 @@ const ignoredMessages = [
   'is not a valid URL',
   'Unsupported URL',
   'ctx.from is not defined',
+  '404: Not Found',
+  'bot was kicked from the supergroup chat',
 ]
 
 interface ExtraErrorInfo {
