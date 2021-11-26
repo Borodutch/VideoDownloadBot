@@ -2,6 +2,7 @@ node_modules
 dist
 .env
 *.log
+output
 
 # yarn
 .pnp.*

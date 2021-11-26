@@ -18,6 +18,10 @@ export default async function downloadUrl(
   try {
     console.log(`Downloading ${downloadJob.url}`)
     // Download
+    const tempDir =
+      process.env.ENVIRONMENT === 'development'
+        ? `${__dirname}/../../output`
+        : '/var/tmp/video-download-bot'
     const fileUuid = uuid()
     const config = {
       dumpSingleJson: true,
@@ -31,19 +35,17 @@ export default async function downloadUrl(
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
-      output: `/var/tmp/video-download-bot/${fileUuid}.%(ext)s`,
+      output: `${tempDir}/${fileUuid}.%(ext)s`,
       mergeOutputFormat: 'mkv',
       noCacheDir: true,
     }
-    const downloadedFileInfo: { title: string; ext: string } = await youtubedl(
+    const downloadedFileInfo: { title: string; ext?: string } = await youtubedl(
       downloadJob.url,
       config
     )
     const { title, ext } = downloadedFileInfo
     const escapedTitle = title.replace('<', '&lt;').replace('>', '&gt;')
-    const filePath = `/var/tmp/video-download-bot/${fileUuid}.${
-      downloadJob.audio ? ext : 'mkv'
-    }`
+    const filePath = `${tempDir}/${fileUuid}.${ext}`
     await youtubedl(downloadJob.url, omit(config, 'dumpSingleJson'))
     // Upload
     downloadJob.status = DownloadJobStatus.uploading
