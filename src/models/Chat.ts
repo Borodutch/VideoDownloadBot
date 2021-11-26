@@ -10,8 +10,6 @@ export class Chat extends FindOrCreate {
   language!: string
   @prop({ required: true, default: false })
   audio!: boolean
-  @prop({ required: true, default: false })
-  chooseFormats!: boolean
 }
 
 const ChatModel = getModelForClass(Chat, {
