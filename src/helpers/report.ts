@@ -10,6 +10,7 @@ const ignoredMessages = [
   'bot was kicked from the supergroup chat',
   'Bad Gateway',
   'message to edit not found',
+  '410: Gone',
 ]
 
 interface ExtraErrorInfo {

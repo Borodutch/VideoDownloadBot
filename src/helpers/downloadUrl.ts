@@ -42,13 +42,16 @@ export default async function downloadUrl(
       noCacheDir: true,
       ...credentialsForUrl,
     }
-    const downloadedFileInfo: { title: string; ext?: string } = await youtubedl(
-      downloadJob.url,
-      config
-    )
-    const { title, ext } = downloadedFileInfo
+    const downloadedFileInfo: {
+      title: string
+      ext?: string
+      entries?: { ext: string }[]
+    } = await youtubedl(downloadJob.url, config)
+    const title = downloadedFileInfo.title
+    const ext =
+      downloadedFileInfo.ext || downloadedFileInfo.entries?.[0]?.ext || 'mkv'
     const escapedTitle = (title || '').replace('<', '&lt;').replace('>', '&gt;')
-    const filePath = `${tempDir}/${fileUuid}.${ext || 'mkv'}`
+    const filePath = `${tempDir}/${fileUuid}.${ext}`
     await youtubedl(downloadJob.url, omit(config, 'dumpSingleJson'))
     // Upload
     downloadJob.status = DownloadJobStatus.uploading
