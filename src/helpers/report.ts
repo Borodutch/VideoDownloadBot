@@ -9,6 +9,7 @@ const ignoredMessages = [
   '404: Not Found',
   'bot was kicked from the supergroup chat',
   'Bad Gateway',
+  'message to edit not found',
 ]
 
 interface ExtraErrorInfo {
