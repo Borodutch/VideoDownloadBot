@@ -17,7 +17,6 @@ export default async function createDownloadJobAndRequest(
   // Create message editor
   const downloadMessageEditor = new MessageEditor(message_id, ctx)
   try {
-    await ctx.replyWithChatAction('typing')
     // Check cache
     try {
       // Check if the url is already in the database
@@ -32,6 +31,7 @@ export default async function createDownloadJobAndRequest(
     } catch (error) {
       throw augmentError(error, 'check cache and send file')
     }
+    await ctx.replyWithChatAction('upload_document')
     // Create download job
     const { doc, created } = await findOrCreateDownloadJob(
       url,
