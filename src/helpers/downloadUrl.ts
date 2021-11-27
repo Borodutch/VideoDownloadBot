@@ -88,6 +88,6 @@ export default async function downloadUrl(
       downloadJob.status = DownloadJobStatus.failedUpload
     }
     await downloadJob.save()
-    report(error, { location: 'downloadUrl' })
+    report(error, { location: 'downloadUrl', meta: downloadJob.url })
   }
 }
