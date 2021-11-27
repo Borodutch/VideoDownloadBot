@@ -2,9 +2,8 @@ import Context from '@/models/Context'
 import createDownloadJobAndRequest from '@/helpers/createDownloadJobAndRequest'
 import report from '@/helpers/report'
 
-export default async function handleUrl(ctx: Context) {
+export default function handleUrl(ctx: Context) {
   try {
-    await ctx.replyWithChatAction('typing')
     const match = ctx.message?.text?.match(
       /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i
     )
