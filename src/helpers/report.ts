@@ -12,6 +12,7 @@ const ignoredMessages = [
   'message to edit not found',
   '410: Gone',
   'replied message not found',
+  'need administrator rights in the channel chat',
 ]
 
 interface ExtraErrorInfo {
