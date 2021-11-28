@@ -33,8 +33,8 @@ export default async function downloadUrl(
       youtubeSkipDashManifest: true,
       noPlaylist: true,
       format: downloadJob.audio
-        ? 'bestaudio'
-        : 'bestvideo+bestaudio/bestvideo/best/bestaudio',
+        ? 'bestaudio[filesize*<=2G]'
+        : 'bestvideo[filesize*<=2G]+bestaudio[filesize*<=2G]/bestvideo[filesize*<=2G]/best[filesize*<=2G]/bestaudio[filesize*<=2G]',
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
