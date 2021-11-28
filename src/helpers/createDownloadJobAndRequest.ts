@@ -11,15 +11,9 @@ export default async function createDownloadJobAndRequest(
   ctx: Context,
   url: string
 ) {
-  const { message_id } = await ctx.reply(ctx.i18n.t('download_started'), {
-    reply_to_message_id: ctx.message?.message_id,
-  })
   // Create message editor
-  const downloadMessageEditor = new MessageEditor(message_id, ctx)
+  const downloadMessageEditor = new MessageEditor(undefined, ctx)
   try {
-    await ctx.replyWithChatAction(
-      ctx.dbchat.audio ? 'upload_voice' : 'upload_video'
-    )
     // Check cache
     try {
       // Check if the url is already in the database
@@ -34,6 +28,14 @@ export default async function createDownloadJobAndRequest(
     } catch (error) {
       throw augmentError(error, 'check cache and send file')
     }
+    // Send downloading message
+    const { message_id } = await ctx.reply(ctx.i18n.t('download_started'), {
+      reply_to_message_id: ctx.message?.message_id,
+    })
+    downloadMessageEditor.messageId = message_id
+    await ctx.replyWithChatAction(
+      ctx.dbchat.audio ? 'upload_voice' : 'upload_video'
+    )
     // Create download job
     const { doc, created } = await findOrCreateDownloadJob(
       url,
