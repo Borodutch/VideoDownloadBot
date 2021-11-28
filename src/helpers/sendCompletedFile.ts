@@ -1,4 +1,5 @@
 import { InputFile } from 'grammy'
+import { Message } from '@grammyjs/types'
 import bot from '@/helpers/bot'
 import i18n from '@/helpers/i18n'
 
@@ -20,12 +21,21 @@ export default async function sendCompletedFile(
     reply_to_message_id: messageId,
     thumb: audio ? undefined : thumb,
   }
-  const sentMessage = audio
-    ? await bot.api.sendAudio(chatId, file, sendDocumentConfig)
-    : await bot.api.sendVideo(chatId, file, sendDocumentConfig)
+  let sentMessage:
+    | Message.DocumentMessage
+    | Message.AudioMessage
+    | Message.VideoMessage
+  try {
+    sentMessage = audio
+      ? await bot.api.sendAudio(chatId, file, sendDocumentConfig)
+      : await bot.api.sendVideo(chatId, file, sendDocumentConfig)
+  } catch (error) {
+    sentMessage = await bot.api.sendDocument(chatId, file, sendDocumentConfig)
+  }
   const fileId =
     ('video' in sentMessage && sentMessage.video.file_id) ||
-    ('audio' in sentMessage && sentMessage.audio.file_id)
+    ('audio' in sentMessage && sentMessage.audio.file_id) ||
+    ('document' in sentMessage && sentMessage.document.file_id)
   if (!fileId) {
     throw new Error('File id not found')
   }
