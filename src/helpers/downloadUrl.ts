@@ -1,3 +1,4 @@
+import * as rimraf from 'rimraf'
 import { DocumentType } from '@typegoose/typegoose'
 import { InputFile } from 'grammy'
 import { findOrCreateChat } from '@/models/Chat'
@@ -16,14 +17,14 @@ const youtubedl = require('@borodutch-labs/yt-dlp-exec')
 export default async function downloadUrl(
   downloadJob: DocumentType<DownloadJob>
 ) {
+  const fileUuid = uuid()
+  const tempDir =
+    process.env.ENVIRONMENT === 'development'
+      ? `${__dirname}/../../output`
+      : '/var/tmp/video-download-bot'
   try {
     console.log(`Downloading url ${downloadJob.url}`)
     // Download
-    const tempDir =
-      process.env.ENVIRONMENT === 'development'
-        ? `${__dirname}/../../output`
-        : '/var/tmp/video-download-bot'
-    const fileUuid = uuid()
     const credentialsForUrl = await credentials(downloadJob.url)
     const config = {
       dumpSingleJson: true,
@@ -92,5 +93,11 @@ export default async function downloadUrl(
     }
     await downloadJob.save()
     report(error, { location: 'downloadUrl', meta: downloadJob.url })
+  } finally {
+    rimraf(`${tempDir}/${fileUuid}*`, (error) => {
+      if (error) {
+        report(error, { location: 'deleting temp files' })
+      }
+    })
   }
 }

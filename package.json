@@ -23,12 +23,14 @@
     "mongoose": "^6.0.13",
     "mongoose-findorcreate": "^3.0.0",
     "random-token": "^0.0.8",
+    "rimraf": "^3.0.2",
     "uuid": "^8.3.2"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.5",
     "@types/lodash": "^4.14.177",
     "@types/node": "^16.11.9",
+    "@types/rimraf": "^3.0.2",
     "@types/uuid": "^8.3.3",
     "@typescript-eslint/eslint-plugin": "^5.4.0",
     "@typescript-eslint/parser": "^5.4.0",
