@@ -8,7 +8,6 @@ import { unlinkSync } from 'fs'
 import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
-import credentials from '@/helpers/credentials'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -25,7 +24,6 @@ export default async function downloadUrl(
   try {
     console.log(`Downloading url ${downloadJob.url}`)
     // Download
-    const credentialsForUrl = await credentials(downloadJob.url)
     const config = {
       dumpSingleJson: true,
       noWarnings: true,
@@ -42,7 +40,6 @@ export default async function downloadUrl(
       mergeOutputFormat: 'mkv',
       noCacheDir: true,
       noPart: true,
-      ...credentialsForUrl,
     }
     const downloadedFileInfo: {
       title: string
