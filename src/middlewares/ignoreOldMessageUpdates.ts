@@ -8,6 +8,7 @@ export default function ignoreOldMessageUpdates(
 ) {
   // Check if context update type is a message
   if (ctx.message) {
+    console.log('Update time', new Date().getTime() / 1000 - ctx.message.date)
     if (new Date().getTime() / 1000 - ctx.message.date < threshold) {
       return next()
     } else {
