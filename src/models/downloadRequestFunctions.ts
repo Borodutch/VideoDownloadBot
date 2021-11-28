@@ -12,7 +12,10 @@ export async function findOrCreateDownloadRequest(
   messageId: number,
   downloadJob: DownloadJob
 ) {
-  if (downloadJob.status === DownloadJobStatus.downloading) {
+  if (
+    downloadJob.status === DownloadJobStatus.created ||
+    downloadJob.status === DownloadJobStatus.downloading
+  ) {
     return DownloadRequestModel.findOrCreate({
       chatId,
       messageId,

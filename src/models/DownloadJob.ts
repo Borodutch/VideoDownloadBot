@@ -25,7 +25,7 @@ export default class DownloadJob extends FindOrCreate {
     required: true,
     index: true,
     enum: DownloadJobStatus,
-    default: DownloadJobStatus.downloading,
+    default: DownloadJobStatus.created,
   })
   status!: DownloadJobStatus
   @prop({ required: true, index: true })

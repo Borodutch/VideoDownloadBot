@@ -1,10 +1,10 @@
 import { findOrCreateDownloadJob } from '@/models/downloadJobFunctions'
 import { findOrCreateDownloadRequest } from '@/models/downloadRequestFunctions'
 import Context from '@/models/Context'
+import DownloadJobStatus from '@/models/DownloadJobStatus'
 import MessageEditor from '@/helpers/MessageEditor'
 import augmentError from '@/helpers/augmentError'
 import checkForCachedUrlAndSendFile from '@/helpers/checkForCachedUrlAndSendFile'
-import downloadUrl from '@/helpers/downloadUrl'
 import report from '@/helpers/report'
 
 export default async function createDownloadJobAndRequest(
@@ -47,7 +47,8 @@ export default async function createDownloadJobAndRequest(
     await findOrCreateDownloadRequest(ctx.dbchat.telegramId, message_id, doc)
     // Start the download
     if (created) {
-      return downloadUrl(doc)
+      doc.status = DownloadJobStatus.downloading
+      await doc.save()
     }
   } catch (error) {
     // Report the error to the admin

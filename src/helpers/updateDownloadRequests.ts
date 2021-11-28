@@ -6,6 +6,7 @@ import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
 import DownloadRequest from '@/models/DownloadRequest'
 import MessageEditor from '@/helpers/MessageEditor'
+import downloadUrl from '@/helpers/downloadUrl'
 import i18n from '@/helpers/i18n'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
@@ -97,13 +98,16 @@ async function deleteDocuments(
 export default async function updateDownloadRequests(
   downloadJob: DocumentType<DownloadJob>
 ) {
-  if (downloadJob.status === DownloadJobStatus.downloading) {
+  if (downloadJob.status === DownloadJobStatus.created) {
     return
   }
   const { requests, chats, editors } = await getDownloadRequestsChatsAndEditors(
     downloadJob
   )
   switch (downloadJob.status) {
+    case DownloadJobStatus.downloading:
+      await downloadUrl(downloadJob)
+      break
     case DownloadJobStatus.uploading:
       await updateMessages(editors, chats, 'uploading_started')
       break

@@ -1,4 +1,5 @@
 enum DownloadJobStatus {
+  created = 'created',
   downloading = 'downloading',
   uploading = 'uploading',
   finished = 'finished',
