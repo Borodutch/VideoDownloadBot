@@ -55,7 +55,7 @@ async function runApp() {
   })
   // Start bot
   await bot.init()
-  run(bot)
+  run(bot, Infinity)
   console.info(`Bot ${bot.botInfo.username} is up and running`)
 }
 
