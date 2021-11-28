@@ -11,6 +11,7 @@ const ignoredMessages = [
   'Bad Gateway',
   'message to edit not found',
   '410: Gone',
+  'replied message not found',
 ]
 
 interface ExtraErrorInfo {
