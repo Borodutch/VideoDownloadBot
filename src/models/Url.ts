@@ -1,9 +1,6 @@
-import * as findorcreate from 'mongoose-findorcreate'
-import { FindOrCreate } from '@typegoose/typegoose/lib/defaultClasses'
-import { getModelForClass, plugin, prop } from '@typegoose/typegoose'
+import { getModelForClass, prop } from '@typegoose/typegoose'
 
-@plugin(findorcreate)
-export class Url extends FindOrCreate {
+export class Url {
   @prop({ required: true, index: true })
   url!: string
   @prop({ required: true, index: true })
@@ -22,11 +19,20 @@ export function findUrl(url: string, audio: boolean) {
   return UrlModel.findOne({ url, audio })
 }
 
-export function findOrCreateUrl(
+export async function findOrCreateUrl(
   url: string,
   fileId: string,
   audio: boolean,
   title: string
 ) {
-  return UrlModel.findOrCreate({ url, audio }, { fileId, title })
+  const dburl = await UrlModel.findOne({ url, audio })
+  if (dburl) {
+    return dburl
+  }
+  return UrlModel.create({
+    url,
+    fileId,
+    audio,
+    title,
+  })
 }
