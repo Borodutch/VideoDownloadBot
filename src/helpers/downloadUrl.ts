@@ -41,6 +41,7 @@ export default async function downloadUrl(
       output: `${tempDir}/${fileUuid}.%(ext)s`,
       mergeOutputFormat: 'mkv',
       noCacheDir: true,
+      noPart: true,
       ...credentialsForUrl,
     }
     const downloadedFileInfo: {
