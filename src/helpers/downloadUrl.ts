@@ -8,6 +8,8 @@ import { unlinkSync } from 'fs'
 import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
+import DownloadedFileInfo from '@/models/DownloadedFileInfo'
+import getThumbnailUrl from '@/helpers/getThumbnailUrl'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -41,11 +43,10 @@ export default async function downloadUrl(
       noCacheDir: true,
       noPart: true,
     }
-    const downloadedFileInfo: {
-      title: string
-      ext?: string
-      entries?: { ext: string }[]
-    } = await youtubedl(downloadJob.url, config)
+    const downloadedFileInfo: DownloadedFileInfo = await youtubedl(
+      downloadJob.url,
+      config
+    )
     const title = downloadedFileInfo.title
     const ext =
       downloadedFileInfo.ext || downloadedFileInfo.entries?.[0]?.ext || 'mkv'
@@ -60,13 +61,15 @@ export default async function downloadUrl(
       downloadJob.originalChatId
     )
     const originalChat = originalChatFindResult.doc
+    const thumb = getThumbnailUrl(downloadedFileInfo)
     const fileId = await sendCompletedFile(
       downloadJob.originalChatId,
       downloadJob.originalMessageId,
       originalChat.language,
       downloadJob.audio,
       escapedTitle,
-      file
+      file,
+      thumb ? new InputFile({ url: thumb }) : undefined
     )
     // Cleanup
     try {

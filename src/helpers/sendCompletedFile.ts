@@ -8,7 +8,8 @@ export default async function sendCompletedFile(
   language: string,
   audio: boolean,
   title: string,
-  file: string | InputFile
+  file: string | InputFile,
+  thumb?: InputFile
 ) {
   const sendDocumentConfig = {
     caption: i18n.t(language, 'video_caption', {
@@ -17,6 +18,7 @@ export default async function sendCompletedFile(
     }),
     parse_mode: 'HTML' as const,
     reply_to_message_id: messageId,
+    thumb: audio ? undefined : thumb,
   }
   const sentMessage = audio
     ? await bot.api.sendAudio(chatId, file, sendDocumentConfig)
