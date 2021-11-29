@@ -13,6 +13,7 @@ const ignoredMessages = [
   '410: Gone',
   'replied message not found',
   'need administrator rights in the channel chat',
+  'Video unavailable',
 ]
 
 interface ExtraErrorInfo {
