@@ -14,6 +14,7 @@ const ignoredMessages = [
   'replied message not found',
   'need administrator rights in the channel chat',
   'Video unavailable',
+  'No video formats found',
 ]
 
 interface ExtraErrorInfo {
