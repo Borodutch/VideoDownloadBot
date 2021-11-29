@@ -15,6 +15,7 @@ const ignoredMessages = [
   'need administrator rights in the channel chat',
   'Video unavailable',
   'No video formats found',
+  'error unknown url type',
 ]
 
 interface ExtraErrorInfo {
