@@ -42,6 +42,7 @@ export default async function downloadUrl(
       mergeOutputFormat: 'mkv',
       noCacheDir: true,
       noPart: true,
+      cookies: `${__dirname}/../../cookie`,
     }
     const downloadedFileInfo: DownloadedFileInfo = await youtubedl(
       downloadJob.url,

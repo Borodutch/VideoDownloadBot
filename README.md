@@ -16,6 +16,7 @@ And you should be good to go! Feel free to fork and submit pull requests. Thanks
 
 - You can run [telegram-bot-api](https://github.com/tdlib/telegram-bot-api) locally to increase the limits
 - Use `.netrc` for the credentials
+- Or you can add cookies to the `cookie` file in the root of this repository
 
 # Environment variables
 
