@@ -1,5 +1,6 @@
 import Context from '@/models/Context'
 import bot from '@/helpers/bot'
+import env from '@/helpers/env'
 
 const ignoredMessages = [
   'bot was blocked by the user',
@@ -45,24 +46,20 @@ function constructErrorMessage(
 }
 
 async function sendToTelegramAdmin(error: Error, info: ExtraErrorInfo) {
-  if (!process.env.ADMIN_ID) {
-    console.log(`ADMIN_ID is not defined`)
-    return
-  }
   try {
     if (
-      process.env.ENVIRONMENT !== 'development' &&
+      env.isDevelopment &&
       ignoredMessages.find((m) => error.message.includes(m))
     ) {
       return
     }
     const message = constructErrorMessage(error, info)
-    await bot.api.sendMessage(process.env.ADMIN_ID, message, {
+    await bot.api.sendMessage(env.ADMIN_ID, message, {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     })
     if (info.ctx) {
-      await info.ctx.forwardMessage(process.env.ADMIN_ID)
+      await info.ctx.forwardMessage(env.ADMIN_ID)
     }
   } catch (sendError) {
     console.error('Error reporting:', sendError)

@@ -9,6 +9,7 @@ import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
 import DownloadedFileInfo from '@/models/DownloadedFileInfo'
+import env from '@/helpers/env'
 import getThumbnailUrl from '@/helpers/getThumbnailUrl'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
@@ -19,10 +20,9 @@ export default async function downloadUrl(
   downloadJob: DocumentType<DownloadJob>
 ) {
   const fileUuid = uuid()
-  const tempDir =
-    process.env.ENVIRONMENT === 'development'
-      ? `${__dirname}/../../output`
-      : '/var/tmp/video-download-bot'
+  const tempDir = env.isDevelopment
+    ? `${__dirname}/../../output`
+    : '/var/tmp/video-download-bot'
   try {
     console.log(`Downloading url ${downloadJob.url}`)
     // Download
@@ -58,10 +58,9 @@ export default async function downloadUrl(
     downloadJob.status = DownloadJobStatus.uploading
     await downloadJob.save()
     const file = new InputFile(filePath)
-    const originalChatFindResult = await findOrCreateChat(
+    const { doc: originalChat } = await findOrCreateChat(
       downloadJob.originalChatId
     )
-    const originalChat = originalChatFindResult.doc
     const thumb = getThumbnailUrl(downloadedFileInfo)
     const fileId = await sendCompletedFile(
       downloadJob.originalChatId,

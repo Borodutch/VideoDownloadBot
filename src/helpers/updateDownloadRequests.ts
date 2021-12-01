@@ -20,8 +20,8 @@ async function getDownloadRequestsChatsAndEditors(
   const chats: ChatMap = {}
   for (const request of requests) {
     if (!chats[request.chatId]) {
-      const { doc } = await findOrCreateChat(request.chatId)
-      chats[request.chatId] = doc
+      const { doc: chat } = await findOrCreateChat(request.chatId)
+      chats[request.chatId] = chat
     }
   }
   const editors = requests.map(

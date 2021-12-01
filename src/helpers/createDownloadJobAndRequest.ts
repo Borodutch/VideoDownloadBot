@@ -37,18 +37,22 @@ export default async function createDownloadJobAndRequest(
       ctx.dbchat.audio ? 'upload_voice' : 'upload_video'
     )
     // Create download job
-    const { doc, created } = await findOrCreateDownloadJob(
+    const { doc: downloadJob, created } = await findOrCreateDownloadJob(
       url,
       ctx.dbchat.audio,
       ctx.dbchat.telegramId,
       message_id
     )
     // Create download request
-    await findOrCreateDownloadRequest(ctx.dbchat.telegramId, message_id, doc)
+    await findOrCreateDownloadRequest(
+      ctx.dbchat.telegramId,
+      message_id,
+      downloadJob
+    )
     // Start the download
     if (created) {
-      doc.status = DownloadJobStatus.downloading
-      await doc.save()
+      downloadJob.status = DownloadJobStatus.downloading
+      await downloadJob.save()
     }
   } catch (error) {
     // Report the error to the admin

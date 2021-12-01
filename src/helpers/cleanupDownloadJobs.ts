@@ -18,12 +18,12 @@ export default async function cleanupDownloadJobs() {
       downloadJob
     )
     for (const downloadRequest of downloadRequests) {
-      const { doc } = await findOrCreateChat(downloadRequest.chatId)
+      const { doc: chat } = await findOrCreateChat(downloadRequest.chatId)
       try {
         await bot.api.editMessageText(
-          doc.telegramId,
+          chat.telegramId,
           downloadRequest.messageId,
-          i18n.t(doc.language, 'error_reboot')
+          i18n.t(chat.language, 'error_reboot')
         )
       } catch (error) {
         report(error, { location: 'cleanupDownloadJobs' })

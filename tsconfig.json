@@ -13,8 +13,7 @@
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "useUnknownInCatchVariables": true,
-    "strict": true,
-    "resolveJsonModule": true
+    "strict": true
   },
   "include": ["src/**/*"]
 }

@@ -1,10 +1,8 @@
 import { connect } from 'mongoose'
+import env from '@/helpers/env'
 
 function startMongo() {
-  if (!process.env.MONGO) {
-    throw new Error('MONGO is not defined')
-  }
-  return connect(process.env.MONGO)
+  return connect(env.MONGO)
 }
 
 export default startMongo

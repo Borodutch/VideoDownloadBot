@@ -1,10 +1,7 @@
-import 'reflect-metadata'
-// Setup @/ aliases for modules
 import 'module-alias/register'
-// Config dotenv
-import * as dotenv from 'dotenv'
-dotenv.config({ path: `${__dirname}/../.env` })
-// Dependencies
+import 'reflect-metadata'
+import 'source-map-support/register'
+
 import { localeActions } from '@/handlers/language'
 import { run } from '@grammyjs/runner'
 import { sendLanguage, setLanguage } from '@/handlers/language'

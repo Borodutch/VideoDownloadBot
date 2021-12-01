@@ -1,7 +1,8 @@
-import { InputFile } from 'grammy'
+import { Bot, InputFile } from 'grammy'
 import { Message } from '@grammyjs/types'
 import bot from '@/helpers/bot'
 import i18n from '@/helpers/i18n'
+import videoUploadBot from '@/helpers/videoUploadBot'
 
 export default async function sendCompletedFile(
   chatId: number,
@@ -25,12 +26,17 @@ export default async function sendCompletedFile(
     | Message.DocumentMessage
     | Message.AudioMessage
     | Message.VideoMessage
+  const botToSendMessage = file instanceof InputFile ? videoUploadBot : bot
   try {
     sentMessage = audio
-      ? await bot.api.sendAudio(chatId, file, sendDocumentConfig)
-      : await bot.api.sendVideo(chatId, file, sendDocumentConfig)
+      ? await botToSendMessage.api.sendAudio(chatId, file, sendDocumentConfig)
+      : await botToSendMessage.api.sendVideo(chatId, file, sendDocumentConfig)
   } catch (error) {
-    sentMessage = await bot.api.sendDocument(chatId, file, sendDocumentConfig)
+    sentMessage = await botToSendMessage.api.sendDocument(
+      chatId,
+      file,
+      sendDocumentConfig
+    )
   }
   const fileId =
     ('video' in sentMessage && sentMessage.video.file_id) ||
