@@ -10,6 +10,7 @@ import bot from '@/helpers/bot'
 import cleanupDownloadJobs from '@/helpers/cleanupDownloadJobs'
 import configureI18n from '@/middlewares/configureI18n'
 import handleAudio from '@/handlers/handleAudio'
+import handleMaxQuality from '@/handlers/handleMaxQuality'
 import handleUrl from '@/handlers/handleUrl'
 import i18n from '@/helpers/i18n'
 import ignoreOldMessageUpdates from '@/middlewares/ignoreOldMessageUpdates'
@@ -33,6 +34,7 @@ async function runApp() {
   bot.command(['help', 'start'], sendHelp)
   bot.command('language', sendLanguage)
   bot.command('audio', handleAudio)
+  bot.command('max_quality', handleMaxQuality)
   // Handlers
   bot.hears(
     /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i,

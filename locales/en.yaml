@@ -7,12 +7,15 @@ help: |
   /help — this message
   /language — change language
   /audio — convert all files to audio
+  /max_quality - automatically download videos in maximum quality
 
   Questions, feedback 👉 @borodutch_support.
 language: 😶 Please, select the language.
 language_selected: 😎 I speak English now.
 audio_on: 📣 I will convert all files to audio-only automatically.
 audio_off: 🎥 I will not convert all files to audio-only automatically.
+max_quality_on: 🎬 I will download all videos in maximum quality.
+max_quality_off: 🎬 I'll let you choose the video quality.
 # User-facing progress messages
 download_started: 😍 Downloading...
 uploading_started: 🤘 Uploading...
