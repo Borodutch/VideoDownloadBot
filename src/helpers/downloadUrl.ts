@@ -1,9 +1,11 @@
 import * as rimraf from 'rimraf'
 import { DocumentType } from '@typegoose/typegoose'
 import { InputFile } from 'grammy'
+import { cwd } from 'process'
 import { findOrCreateChat } from '@/models/Chat'
 import { findOrCreateUrl } from '@/models/Url'
 import { omit } from 'lodash'
+import { resolve } from 'path'
 import { unlinkSync } from 'fs'
 import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
@@ -21,7 +23,7 @@ export default async function downloadUrl(
 ) {
   const fileUuid = uuid()
   const tempDir = env.isDevelopment
-    ? `${__dirname}/../../output`
+    ? resolve(cwd(), 'output')
     : '/var/tmp/video-download-bot'
   try {
     console.log(`Downloading url ${downloadJob.url}`)
@@ -42,7 +44,7 @@ export default async function downloadUrl(
       mergeOutputFormat: 'mkv',
       noCacheDir: true,
       noPart: true,
-      cookies: `${__dirname}/../../cookie`,
+      cookies: resolve(cwd(), 'cookie'),
     }
     const downloadedFileInfo: DownloadedFileInfo = await youtubedl(
       downloadJob.url,

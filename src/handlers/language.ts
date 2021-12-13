@@ -1,6 +1,8 @@
 import { InlineKeyboard } from 'grammy'
+import { cwd } from 'process'
 import { load } from 'js-yaml'
 import { readFileSync, readdirSync } from 'fs'
+import { resolve } from 'path'
 import Context from '@/models/Context'
 
 interface YamlWithName {
@@ -36,7 +38,7 @@ function languageKeyboard() {
     const localeCode = locale.split('.')[0]
     const localeName = (
       load(
-        readFileSync(`${__dirname}/../../locales/${locale}`, 'utf8')
+        readFileSync(resolve(cwd(), 'locales', locale), 'utf8')
       ) as YamlWithName
     ).name as string
     keyboard.text(localeName, localeCode)
@@ -48,5 +50,5 @@ function languageKeyboard() {
 }
 
 function localesFiles() {
-  return readdirSync(`${__dirname}/../../locales`)
+  return readdirSync(resolve(cwd(), 'locales'))
 }
