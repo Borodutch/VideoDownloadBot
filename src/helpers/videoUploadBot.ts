@@ -4,6 +4,7 @@ import Context from '@/models/Context'
 import env from '@/helpers/env'
 
 const videoUploadBot = new Bot<Context>(env.TOKEN, {
+  ContextConstructor: Context,
   client: {
     apiRoot: 'http://localhost:8081',
     baseFetchConfig: {

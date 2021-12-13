@@ -29,9 +29,7 @@ export default async function createDownloadJobAndRequest(
       throw augmentError(error, 'check cache and send file')
     }
     // Send downloading message
-    const { message_id } = await ctx.reply(ctx.i18n.t('download_started'), {
-      reply_to_message_id: ctx.message?.message_id,
-    })
+    const { message_id } = await ctx.replyWithLocalization('download_started')
     downloadMessageEditor.messageId = message_id
     await ctx.replyWithChatAction(
       ctx.dbchat.audio ? 'upload_voice' : 'upload_video'

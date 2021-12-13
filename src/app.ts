@@ -2,19 +2,19 @@ import 'module-alias/register'
 import 'reflect-metadata'
 import 'source-map-support/register'
 
-import { localeActions } from '@/handlers/language'
+import { ignoreOld } from 'grammy-middlewares'
 import { run } from '@grammyjs/runner'
-import { sendLanguage, setLanguage } from '@/handlers/language'
 import attachUser from '@/middlewares/attachUser'
 import bot from '@/helpers/bot'
 import cleanupDownloadJobs from '@/helpers/cleanupDownloadJobs'
 import configureI18n from '@/middlewares/configureI18n'
-import handleAudio from '@/handlers/handleAudio'
-import handleUrl from '@/handlers/handleUrl'
+import handleAudio from '@/handlers/audio'
+import handleHelp from '@/handlers/help'
+import handleLanguage from '@/handlers/language'
+import handleUrl from '@/handlers/url'
 import i18n from '@/helpers/i18n'
-import ignoreOldMessageUpdates from '@/middlewares/ignoreOldMessageUpdates'
+import languageMenu from '@/menus/language'
 import report from '@/helpers/report'
-import sendHelp from '@/handlers/sendHelp'
 import startMongo from '@/helpers/startMongo'
 
 async function runApp() {
@@ -25,25 +25,26 @@ async function runApp() {
   // Cleanup download jobs
   await cleanupDownloadJobs()
   // Middlewares
-  bot.use(ignoreOldMessageUpdates)
-  bot.use(attachUser)
-  bot.use(i18n.middleware())
-  bot.use(configureI18n)
+  bot
+    .use(ignoreOld())
+    .use(attachUser)
+    .use(i18n.middleware())
+    .use(configureI18n)
+    // Menus
+    .use(languageMenu)
   // Commands
-  bot.command(['help', 'start'], sendHelp)
-  bot.command('language', sendLanguage)
+  bot.command(['help', 'start'], handleHelp)
+  bot.command('language', handleLanguage)
   bot.command('audio', handleAudio)
   // Handlers
   bot.hears(
     /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i,
     handleUrl
   )
-  // Actions
-  bot.callbackQuery(localeActions, setLanguage)
   // Catch all
   bot.use((ctx) => {
     if (ctx.chat?.type === 'private') {
-      return sendHelp(ctx)
+      return handleHelp(ctx)
     }
   })
   // Errors
