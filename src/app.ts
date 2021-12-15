@@ -17,6 +17,7 @@ import ignoreOldMessageUpdates from '@/middlewares/ignoreOldMessageUpdates'
 import report from '@/helpers/report'
 import sendHelp from '@/handlers/sendHelp'
 import startMongo from '@/helpers/startMongo'
+import { resolutionMenu } from './menus/resolutionMenu'
 
 async function runApp() {
   console.log('Starting app...')
@@ -35,6 +36,8 @@ async function runApp() {
   bot.command('language', sendLanguage)
   bot.command('audio', handleAudio)
   bot.command('max_quality', handleMaxQuality)
+  // Menus
+  bot.use(resolutionMenu)
   // Handlers
   bot.hears(
     /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/i,

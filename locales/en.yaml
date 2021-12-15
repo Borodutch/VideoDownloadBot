@@ -20,6 +20,9 @@ max_quality_off: 🎬 I'll let you choose the video quality.
 download_started: 😍 Downloading...
 uploading_started: 🤘 Uploading...
 download_complete: 🎉 Download complete!
+check_resolutions: ⏳ Search for available resolutions...
+# Messages
+resolutions_question: 'Select resolution:'
 # Caption for completed video
 video_caption: |
   <b>${title}</b>
@@ -31,3 +34,4 @@ error_cache_or_download_job: 😱 I couldn't get the video from cache or create 
 error_video_download: 😱 I couldn't download the video.
 error_video_upload: 😱 I couldn't upload the video.
 error_reboot: 😱 The server rebooted, while I was working on the file. Please, try again!
+error_outdated_menu: 😱 Sorry, this menu is outdated

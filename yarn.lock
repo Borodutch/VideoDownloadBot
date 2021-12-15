@@ -46,6 +46,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@grammyjs/menu@npm:^1.0.4":
+  version: 1.0.4
+  resolution: "@grammyjs/menu@npm:1.0.4"
+  peerDependencies:
+    grammy: ^1.0.0
+  checksum: bb53965399780d25566f85dfbf717c18324a1fbbd82e54722e063e151dbbe2f07e0a60723d52f45bd83b79e2b2cf678e9a114ac7bd7ebc1e33721bf5be7abbfc
+  languageName: node
+  linkType: hard
+
 "@grammyjs/runner@npm:^1.0.2":
   version: 1.0.2
   resolution: "@grammyjs/runner@npm:1.0.2"
@@ -2470,6 +2479,7 @@ __metadata:
   dependencies:
     "@borodutch-labs/yt-dlp-exec": 2.0.0
     "@grammyjs/i18n": ^0.3.0
+    "@grammyjs/menu": ^1.0.4
     "@grammyjs/runner": ^1.0.2
     "@typegoose/typegoose": ^9.2.0
     "@types/js-yaml": ^4.0.5

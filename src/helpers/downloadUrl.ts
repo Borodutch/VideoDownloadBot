@@ -26,6 +26,11 @@ export default async function downloadUrl(
   try {
     console.log(`Downloading url ${downloadJob.url}`)
     // Download
+
+    const videoFormatString = downloadJob.resolution
+      ? `[height=${downloadJob.resolution}][filesize<=?2G][ext=mp4]/[height=${downloadJob.resolution}][filesize<=?2G]`
+      : '[filesize<=?2G]'
+
     const config = {
       dumpSingleJson: true,
       noWarnings: true,
@@ -34,7 +39,7 @@ export default async function downloadUrl(
       noPlaylist: true,
       format: downloadJob.audio
         ? 'bestaudio[filesize<=?2G]'
-        : '[filesize<=?2G]',
+        : videoFormatString,
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
@@ -82,7 +87,8 @@ export default async function downloadUrl(
       downloadJob.url,
       fileId,
       downloadJob.audio,
-      escapedTitle || 'No title'
+      escapedTitle || 'No title',
+      downloadJob.resolution
     )
     downloadJob.status = DownloadJobStatus.finished
     await downloadJob.save()

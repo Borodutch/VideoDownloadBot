@@ -9,23 +9,26 @@ export class Url {
   audio!: boolean
   @prop({ required: true })
   title!: string
+  @prop({ index: true })
+  resolution?: number
 }
 
 const UrlModel = getModelForClass(Url, {
   schemaOptions: { timestamps: true },
 })
 
-export function findUrl(url: string, audio: boolean) {
-  return UrlModel.findOne({ url, audio })
+export function findUrl(url: string, audio: boolean, resolution?: number) {
+  return UrlModel.findOne({ url, audio, resolution })
 }
 
 export async function findOrCreateUrl(
   url: string,
   fileId: string,
   audio: boolean,
-  title: string
+  title: string,
+  resolution?: number
 ) {
-  const dburl = await UrlModel.findOne({ url, audio })
+  const dburl = await UrlModel.findOne({ url, audio, resolution })
   if (dburl) {
     return dburl
   }
@@ -34,5 +37,6 @@ export async function findOrCreateUrl(
     fileId,
     audio,
     title,
+    resolution,
   })
 }

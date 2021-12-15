@@ -32,4 +32,6 @@ export default class DownloadJob extends FindOrCreate {
   originalChatId!: number
   @prop({ required: true, index: true })
   originalMessageId!: number
+  @prop({ index: true })
+  resolution?: number
 }

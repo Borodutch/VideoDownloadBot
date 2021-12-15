@@ -9,7 +9,8 @@ import report from '@/helpers/report'
 
 export default async function createDownloadJobAndRequest(
   ctx: Context,
-  url: string
+  url: string,
+  resolution?: number
 ) {
   // Create message editor
   const downloadMessageEditor = new MessageEditor(undefined, ctx)
@@ -20,7 +21,8 @@ export default async function createDownloadJobAndRequest(
       const cached = await checkForCachedUrlAndSendFile(
         url,
         ctx,
-        downloadMessageEditor
+        downloadMessageEditor,
+        resolution
       )
       if (cached) {
         return
@@ -41,7 +43,8 @@ export default async function createDownloadJobAndRequest(
       url,
       ctx.dbchat.audio,
       ctx.dbchat.telegramId,
-      message_id
+      message_id,
+      resolution
     )
     // Create download request
     await findOrCreateDownloadRequest(

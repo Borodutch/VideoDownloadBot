@@ -4,10 +4,11 @@ export function findOrCreateDownloadJob(
   url: string,
   audio: boolean,
   originalChatId: number,
-  originalMessageId: number
+  originalMessageId: number,
+  resolution?: number
 ) {
   return DownloadJobModel.findOrCreate(
-    { url, audio },
+    { url, audio, resolution },
     { originalChatId, originalMessageId }
   )
 }
