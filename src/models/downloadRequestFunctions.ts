@@ -34,6 +34,9 @@ export async function findOrCreateDownloadRequest(
     case DownloadJobStatus.failedUpload:
       await editor.editMessage(i18n.t(doc.language, 'error_video_upload'))
       break
+    case DownloadJobStatus.unsupportedUrl:
+      await editor.editMessage(i18n.t(doc.language, 'error_unsupported_url'))
+      break
     case DownloadJobStatus.finished: {
       const url = await findUrl(downloadJob.url, downloadJob.audio)
       if (!url) {
