@@ -1,4 +1,4 @@
-import { Bot, InputFile } from 'grammy'
+import { InputFile } from 'grammy'
 import { Message } from '@grammyjs/types'
 import bot from '@/helpers/bot'
 import i18n from '@/helpers/i18n'
