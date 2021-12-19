@@ -90,7 +90,13 @@ export default async function downloadUrl(
     await downloadJob.save()
   } catch (error) {
     if (downloadJob.status === DownloadJobStatus.downloading) {
-      downloadJob.status = DownloadJobStatus.failedDownload
+      if (error instanceof Error) {
+        if (error.message.includes('Unsupported URL')) {
+          downloadJob.status = DownloadJobStatus.unsupportedUrl
+        } else {
+          downloadJob.status = DownloadJobStatus.failedDownload
+        }
+      }
     } else if (downloadJob.status === DownloadJobStatus.uploading) {
       downloadJob.status = DownloadJobStatus.failedUpload
     }
