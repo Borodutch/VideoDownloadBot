@@ -124,5 +124,9 @@ export default async function updateDownloadRequests(
       await updateMessages(editors, chats, 'error_video_upload')
       await deleteDocuments(downloadJob, requests)
       break
+    case DownloadJobStatus.unsupportedUrl:
+      await updateMessages(editors, chats, 'error_unsupported_url')
+      await deleteDocuments(downloadJob, requests)
+      break
   }
 }
