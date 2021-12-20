@@ -1,5 +1,6 @@
-import { getModelForClass, prop } from '@typegoose/typegoose'
+import { getModelForClass, modelOptions, prop } from '@typegoose/typegoose'
 
+@modelOptions({ schemaOptions: { timestamps: true } })
 export class Url {
   @prop({ required: true, index: true })
   url!: string
@@ -11,9 +12,7 @@ export class Url {
   title!: string
 }
 
-const UrlModel = getModelForClass(Url, {
-  schemaOptions: { timestamps: true },
-})
+const UrlModel = getModelForClass(Url)
 
 export function findUrl(url: string, audio: boolean) {
   return UrlModel.findOne({ url, audio })

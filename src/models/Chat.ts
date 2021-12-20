@@ -1,8 +1,14 @@
 import * as findorcreate from 'mongoose-findorcreate'
 import { FindOrCreate } from '@typegoose/typegoose/lib/defaultClasses'
-import { getModelForClass, plugin, prop } from '@typegoose/typegoose'
+import {
+  getModelForClass,
+  modelOptions,
+  plugin,
+  prop,
+} from '@typegoose/typegoose'
 
 @plugin(findorcreate)
+@modelOptions({ schemaOptions: { timestamps: true } })
 export class Chat extends FindOrCreate {
   @prop({ required: true, index: true, unique: true })
   telegramId!: number
@@ -12,9 +18,7 @@ export class Chat extends FindOrCreate {
   audio!: boolean
 }
 
-const ChatModel = getModelForClass(Chat, {
-  schemaOptions: { timestamps: true },
-})
+const ChatModel = getModelForClass(Chat)
 
 export function findOrCreateChat(telegramId: number) {
   return ChatModel.findOrCreate({ telegramId })
