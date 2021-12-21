@@ -48,7 +48,7 @@ function constructErrorMessage(
 async function sendToTelegramAdmin(error: Error, info: ExtraErrorInfo) {
   try {
     if (
-      env.isDevelopment &&
+      !env.isDevelopment &&
       ignoredMessages.find((m) => error.message.includes(m))
     ) {
       return
