@@ -15,6 +15,7 @@ import env from '@/helpers/env'
 import getThumbnailUrl from '@/helpers/getThumbnailUrl'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const youtubedl = require('@borodutch-labs/yt-dlp-exec')
 
@@ -35,8 +36,8 @@ export default async function downloadUrl(
       youtubeSkipDashManifest: true,
       noPlaylist: true,
       format: downloadJob.audio
-        ? 'bestaudio[filesize<=?2G]'
-        : '[filesize<=?2G]',
+        ? 'bestaudio[filesize<=?2G][filesize<=2048]/[filesize_approx<=2048M]'
+        : '[filesize<=?2G][filesize<=2048]/[filesize_approx<=2048M]',
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
@@ -89,10 +90,16 @@ export default async function downloadUrl(
     downloadJob.status = DownloadJobStatus.finished
     await downloadJob.save()
   } catch (error) {
+    console.log(downloadJob.status)
     if (downloadJob.status === DownloadJobStatus.downloading) {
       if (error instanceof Error) {
+        console.log(error.message)
         if (error.message.includes('Unsupported URL')) {
           downloadJob.status = DownloadJobStatus.unsupportedUrl
+        } else if (
+          error.message.includes('Requested format is not available')
+        ) {
+          downloadJob.status = DownloadJobStatus.noSuitableVideoSize
         } else {
           downloadJob.status = DownloadJobStatus.failedDownload
         }

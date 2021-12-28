@@ -128,5 +128,9 @@ export default async function updateDownloadRequests(
       await updateMessages(editors, chats, 'error_unsupported_url')
       await deleteDocuments(downloadJob, requests)
       break
+    case DownloadJobStatus.noSuitableVideoSize:
+      await updateMessages(editors, chats, 'error_no_suitable_video_size')
+      await deleteDocuments(downloadJob, requests)
+      break
   }
 }
