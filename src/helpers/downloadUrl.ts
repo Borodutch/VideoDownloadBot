@@ -36,8 +36,8 @@ export default async function downloadUrl(
       youtubeSkipDashManifest: true,
       noPlaylist: true,
       format: downloadJob.audio
-        ? 'bestaudio[filesize<=?2G][filesize<=2048]/[filesize_approx<=2048M]'
-        : '[filesize<=?2G][filesize<=2048]/[filesize_approx<=2048M]',
+        ? 'bestaudio[filesize<=2G]/[filesize_approx<=2G]'
+        : '[filesize<=?2G][filesize<=2G]/[filesize_approx<=2G]',
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
@@ -90,10 +90,8 @@ export default async function downloadUrl(
     downloadJob.status = DownloadJobStatus.finished
     await downloadJob.save()
   } catch (error) {
-    console.log(downloadJob.status)
     if (downloadJob.status === DownloadJobStatus.downloading) {
       if (error instanceof Error) {
-        console.log(error.message)
         if (error.message.includes('Unsupported URL')) {
           downloadJob.status = DownloadJobStatus.unsupportedUrl
         } else if (
