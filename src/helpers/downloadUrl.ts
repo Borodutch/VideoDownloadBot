@@ -37,7 +37,7 @@ export default async function downloadUrl(
       noPlaylist: true,
       format: downloadJob.audio
         ? 'bestaudio[filesize<=2G]/[filesize_approx<=2G]'
-        : '[filesize<=?2G][filesize<=2G]/[filesize_approx<=2G]',
+        : '[filesize<=2G]/[filesize_approx<=2G]',
       maxFilesize: '2048m',
       noCallHome: true,
       noProgress: true,
