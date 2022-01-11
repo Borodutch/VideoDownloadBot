@@ -37,6 +37,11 @@ export async function findOrCreateDownloadRequest(
     case DownloadJobStatus.unsupportedUrl:
       await editor.editMessage(i18n.t(doc.language, 'error_unsupported_url'))
       break
+    case DownloadJobStatus.noSuitableVideoSize:
+      await editor.editMessage(
+        i18n.t(doc.language, 'error_no_suitable_video_size')
+      )
+      break
     case DownloadJobStatus.finished: {
       const url = await findUrl(downloadJob.url, downloadJob.audio)
       if (!url) {

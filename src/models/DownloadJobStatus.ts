@@ -6,6 +6,7 @@ enum DownloadJobStatus {
   failedDownload = 'failedDownload',
   failedUpload = 'failedUpload',
   unsupportedUrl = 'unsupportedUrl',
+  noSuitableVideoSize = 'noSuitableVideoSize',
 }
 
 export default DownloadJobStatus
