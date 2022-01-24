@@ -1106,15 +1106,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ffmpeg@npm:^0.0.4":
-  version: 0.0.4
-  resolution: "ffmpeg@npm:0.0.4"
-  dependencies:
-    when: ">= 0.0.1"
-  checksum: db07e76f03901271ff9baf9a101f07982ea8622eb32c4f5646bde40673fd6290b09bc2d36abc9a95cf24626423f6b07019e0134b3851823e5a64fd8b38d9524d
-  languageName: node
-  linkType: hard
-
 "file-entry-cache@npm:^6.0.1":
   version: 6.0.1
   resolution: "file-entry-cache@npm:6.0.1"
@@ -2537,7 +2528,6 @@ __metadata:
     eslint-plugin-node: ^11.1.0
     eslint-plugin-prettier: ^4.0.0
     eslint-plugin-sort-imports-es6-autofix: ^0.6.0
-    ffmpeg: ^0.0.4
     grammy: ^1.5.3
     grammy-middlewares: ^1.0.11
     lodash: ^4.17.21
@@ -2585,13 +2575,6 @@ __metadata:
     tr46: ~0.0.3
     webidl-conversions: ^3.0.0
   checksum: b8daed4ad3356cc4899048a15b2c143a9aed0dfae1f611ebd55073310c7b910f522ad75d727346ad64203d7e6c79ef25eafd465f4d12775ca44b90fa82ed9e2c
-  languageName: node
-  linkType: hard
-
-"when@npm:>= 0.0.1":
-  version: 3.7.8
-  resolution: "when@npm:3.7.8"
-  checksum: 1f7a3d4a125c61108c51a58b7e42350d290f0595c42fb864a38d403101b40ede28d29068c9f7a8c3e4e0128f2050f7cc68c7e82b3a39a9156f6929fc69bf42fb
   languageName: node
   linkType: hard
 

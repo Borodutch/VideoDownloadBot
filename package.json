@@ -20,7 +20,6 @@
     "@grammyjs/runner": "^1.0.3",
     "@typegoose/typegoose": "^9.3.1",
     "envalid": "^7.2.2",
-    "ffmpeg": "^0.0.4",
     "grammy": "^1.5.3",
     "grammy-middlewares": "^1.0.11",
     "lodash": "^4.17.21",
