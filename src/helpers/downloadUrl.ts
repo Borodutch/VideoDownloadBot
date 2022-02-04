@@ -47,7 +47,6 @@ export default async function downloadUrl(
       noPart: true,
       cookies: resolve(cwd(), 'cookie'),
       recodeVideo: 'mp4',
-      embedThumbnail: true,
     }
     const downloadedFileInfo: DownloadedFileInfo = await youtubedl(
       downloadJob.url,
@@ -66,7 +65,7 @@ export default async function downloadUrl(
     const { doc: originalChat } = await findOrCreateChat(
       downloadJob.originalChatId
     )
-    const thumb = getThumbnailUrl(downloadedFileInfo)
+    const thumb = await getThumbnailUrl(downloadedFileInfo)
     const fileId = await sendCompletedFile(
       downloadJob.originalChatId,
       downloadJob.originalMessageId,
@@ -74,11 +73,12 @@ export default async function downloadUrl(
       downloadJob.audio,
       escapedTitle,
       file,
-      thumb ? new InputFile({ url: thumb }) : undefined
+      thumb ? new InputFile(thumb) : undefined
     )
     // Cleanup
     try {
       await unlinkSync(filePath)
+      await unlinkSync(thumb)
     } catch (error) {
       report(error, { location: 'deleting downloaded file' })
     }
