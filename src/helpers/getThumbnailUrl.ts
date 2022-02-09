@@ -27,7 +27,7 @@ export default async function getThumbnailUrl(
   let thumbnailPath = ''
   if (thumbnailUrl == '') {
     thumbnailPath = `${tempDir}/${thumbnailUuid}.jpeg`
-    await new SimpleThumbnail().generate(videoPath, thumbnailPath, '320x3220', {
+    await new SimpleThumbnail().generate(videoPath, thumbnailPath, '320x320', {
       path: pathToFfmpeg,
       seek: '00:04:01',
     })
