@@ -65,7 +65,7 @@ export default async function downloadUrl(
     const { doc: originalChat } = await findOrCreateChat(
       downloadJob.originalChatId
     )
-    const thumb = await getThumbnailUrl(downloadedFileInfo)
+    const thumb = await getThumbnailUrl(downloadedFileInfo, filePath)
     const fileId = await sendCompletedFile(
       downloadJob.originalChatId,
       downloadJob.originalMessageId,

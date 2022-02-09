@@ -20,6 +20,7 @@
     "@grammyjs/runner": "^1.0.3",
     "@typegoose/typegoose": "^9.3.1",
     "envalid": "^7.2.2",
+    "ffmpeg-static": "^4.4.1",
     "grammy": "^1.5.3",
     "grammy-middlewares": "^1.0.11",
     "lodash": "^4.17.21",
@@ -28,10 +29,12 @@
     "random-token": "^0.0.8",
     "rimraf": "^3.0.2",
     "sharp": "^0.30.0",
+    "simple-thumbnail-ts": "^1.0.2",
     "turbo-downloader": "^1.0.9",
     "uuid": "^8.3.2"
   },
   "devDependencies": {
+    "@types/ffmpeg-static": "^3.0.1",
     "@types/js-yaml": "^4.0.5",
     "@types/lodash": "^4.14.178",
     "@types/node": "^16.11.12",
