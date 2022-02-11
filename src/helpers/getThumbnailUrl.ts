@@ -3,10 +3,13 @@ import * as sharp from 'sharp'
 import * as uuid from 'uuid'
 import { cwd } from 'process'
 import { resolve } from 'path'
+import { unlinkSync } from 'fs'
 import DownloadedFileInfo from '@/models/DownloadedFileInfo'
 import SimpleThumbnail from 'simple-thumbnail-ts'
 import TurboDownloader from 'turbo-downloader'
 import env from '@/helpers/env'
+import ffmpeg = require('fluent-ffmpeg')
+import Math = require('mathjs')
 
 const tempDir = env.isDevelopment
   ? resolve(cwd(), 'output')
@@ -25,11 +28,12 @@ export default async function getThumbnailUrl(
     }
   }
   let thumbnailPath = ''
-  if (thumbnailUrl == '') {
+  if (!thumbnailUrl) {
+    const videoDuration = await getVideoDuration(videoPath)
     thumbnailPath = `${tempDir}/${thumbnailUuid}.jpeg`
     await new SimpleThumbnail().generate(videoPath, thumbnailPath, '320x320', {
       path: pathToFfmpeg,
-      seek: '00:04:01',
+      seek: videoDuration,
     })
     return thumbnailPath
   }
@@ -37,13 +41,14 @@ export default async function getThumbnailUrl(
 
   const outputPath = `${tempDir}/${thumbnailUuid}.jpeg`
   await sharp(thumbnailPath)
-    .resize(320, 320)
+    .resize({ width: 320, height: 320, fit: sharp.fit.contain })
     .toFormat('jpeg')
     .toFile(outputPath)
+  unlinkSync(thumbnailPath)
   return outputPath
 }
 
-async function downloadThumbnail(url: string, id?: string) {
+async function downloadThumbnail(url: string, id: string) {
   const path = `${tempDir}/${id}`
   const downloader = new TurboDownloader({
     url,
@@ -51,4 +56,30 @@ async function downloadThumbnail(url: string, id?: string) {
   })
   await downloader.download()
   return path
+}
+
+async function getVideoDuration(videoPath: string): Promise<string> {
+  return await new Promise((res) => {
+    ffmpeg.ffprobe(videoPath, function (err, data) {
+      if (data.format.duration) {
+        const durationVideo = data.format.duration
+        const hour = Math.floor(durationVideo / 3600)
+        const minutes = Math.floor((durationVideo - hour * 3600) / 60)
+        const seconds = Math.floor(durationVideo - hour * 3600 - minutes * 60)
+        res(
+          `${
+            hour / 2 < 10 ? `0${(hour / 2).toFixed(0)}` : (hour / 2).toFixed(0)
+          }:${
+            minutes / 2 < 10
+              ? `0${(minutes / 2).toFixed(0)}`
+              : (minutes / 2).toFixed(0)
+          }:${
+            seconds / 2 < 10
+              ? `0${(seconds / 2).toFixed(0)}`
+              : (seconds / 2).toFixed(0)
+          }`
+        )
+      }
+    })
+  })
 }
