@@ -1,15 +1,12 @@
-import * as pathToFfmpeg from 'ffmpeg-static'
 import * as sharp from 'sharp'
 import * as uuid from 'uuid'
 import { cwd } from 'process'
 import { resolve } from 'path'
-import { unlinkSync } from 'fs'
 import DownloadedFileInfo from '@/models/DownloadedFileInfo'
-import SimpleThumbnail from 'simple-thumbnail-ts'
 import TurboDownloader from 'turbo-downloader'
 import env from '@/helpers/env'
+import unlincSyncSafe from '@/helpers/unlincSyncSafe'
 import ffmpeg = require('fluent-ffmpeg')
-import Math = require('mathjs')
 
 const tempDir = env.isDevelopment
   ? resolve(cwd(), 'output')
@@ -29,12 +26,8 @@ export default async function getThumbnailUrl(
   }
   let thumbnailPath = ''
   if (!thumbnailUrl) {
-    const videoDuration = await getVideoDuration(videoPath)
-    thumbnailPath = `${tempDir}/${thumbnailUuid}.jpeg`
-    await new SimpleThumbnail().generate(videoPath, thumbnailPath, '320x320', {
-      path: pathToFfmpeg,
-      seek: videoDuration,
-    })
+    thumbnailPath = resolve(tempDir, `${thumbnailUuid}.jpeg`)
+    await makeThumbnail(videoPath, thumbnailUuid)
     return thumbnailPath
   }
   thumbnailPath = await downloadThumbnail(thumbnailUrl, thumbnailUuid)
@@ -44,7 +37,7 @@ export default async function getThumbnailUrl(
     .resize({ width: 320, height: 320, fit: sharp.fit.contain })
     .toFormat('jpeg')
     .toFile(outputPath)
-  unlinkSync(thumbnailPath)
+  unlincSyncSafe(thumbnailPath)
   return outputPath
 }
 
@@ -58,28 +51,11 @@ async function downloadThumbnail(url: string, id: string) {
   return path
 }
 
-async function getVideoDuration(videoPath: string): Promise<string> {
-  return await new Promise((res) => {
-    ffmpeg.ffprobe(videoPath, function (err, data) {
-      if (data.format.duration) {
-        const durationVideo = data.format.duration
-        const hour = Math.floor(durationVideo / 3600)
-        const minutes = Math.floor((durationVideo - hour * 3600) / 60)
-        const seconds = Math.floor(durationVideo - hour * 3600 - minutes * 60)
-        res(
-          `${
-            hour / 2 < 10 ? `0${(hour / 2).toFixed(0)}` : (hour / 2).toFixed(0)
-          }:${
-            minutes / 2 < 10
-              ? `0${(minutes / 2).toFixed(0)}`
-              : (minutes / 2).toFixed(0)
-          }:${
-            seconds / 2 < 10
-              ? `0${(seconds / 2).toFixed(0)}`
-              : (seconds / 2).toFixed(0)
-          }`
-        )
-      }
-    })
+async function makeThumbnail(videoPath: string, uuid: string) {
+  await ffmpeg(videoPath).thumbnail({
+    timestamps: ['50%'],
+    filename: `${uuid}.jpeg`,
+    folder: tempDir,
+    size: '320x320',
   })
 }

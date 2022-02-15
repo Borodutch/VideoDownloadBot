@@ -6,7 +6,6 @@ import { findOrCreateChat } from '@/models/Chat'
 import { findOrCreateUrl } from '@/models/Url'
 import { omit } from 'lodash'
 import { resolve } from 'path'
-import { unlinkSync } from 'fs'
 import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
@@ -15,6 +14,7 @@ import env from '@/helpers/env'
 import getThumbnailUrl from '@/helpers/getThumbnailUrl'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
+import unlincSyncSafe from '@/helpers/unlincSyncSafe'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const youtubedl = require('@borodutch-labs/yt-dlp-exec')
@@ -66,6 +66,7 @@ export default async function downloadUrl(
       downloadJob.originalChatId
     )
     const thumb = await getThumbnailUrl(downloadedFileInfo, filePath)
+    console.log('Превью получено')
     const fileId = await sendCompletedFile(
       downloadJob.originalChatId,
       downloadJob.originalMessageId,
@@ -77,8 +78,8 @@ export default async function downloadUrl(
     )
     // Cleanup
     try {
-      await unlinkSync(filePath)
-      await unlinkSync(thumb)
+      await unlincSyncSafe(filePath)
+      await unlincSyncSafe(thumb)
     } catch (error) {
       report(error, { location: 'deleting downloaded file' })
     }
