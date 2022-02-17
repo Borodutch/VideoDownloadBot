@@ -25,24 +25,23 @@ export default async function getThumbnailUrl(
     }
   }
   let thumbnailPath = ''
+  thumbnailUrl = ''
   if (!thumbnailUrl) {
-    thumbnailPath = resolve(tempDir, `${thumbnailUuid}.jpeg`)
-    await makeThumbnail(videoPath, thumbnailUuid)
+    const thumbName = `${thumbnailUuid}.jpeg`
+    thumbnailPath = resolve(tempDir, thumbName)
+    await makeThumbnail(videoPath, thumbName)
     return thumbnailPath
   }
-  thumbnailPath = await downloadThumbnail(thumbnailUrl, thumbnailUuid)
 
-  const outputPath = `${tempDir}/${thumbnailUuid}.jpeg`
-  await sharp(thumbnailPath)
-    .resize({ width: 320, height: 320, fit: sharp.fit.contain })
-    .toFormat('jpeg')
-    .toFile(outputPath)
+  const outputPath = resolve(tempDir, `${thumbnailUuid}-done.jpeg`)
+  thumbnailPath = await downloadThumbnail(thumbnailUrl, thumbnailUuid)
+  const thumbPathDone = await resizeThumb(thumbnailPath, outputPath)
   unlincSyncSafe(thumbnailPath)
-  return outputPath
+  return thumbPathDone
 }
 
 async function downloadThumbnail(url: string, id: string) {
-  const path = `${tempDir}/${id}`
+  const path = resolve(tempDir, `${id}-downloadUrl`)
   const downloader = new TurboDownloader({
     url,
     destFile: path,
@@ -51,11 +50,18 @@ async function downloadThumbnail(url: string, id: string) {
   return path
 }
 
-async function makeThumbnail(videoPath: string, uuid: string) {
+async function makeThumbnail(videoPath: string, filename: string) {
   await ffmpeg(videoPath).thumbnail({
     timestamps: ['50%'],
-    filename: `${uuid}.jpeg`,
+    filename,
     folder: tempDir,
-    size: '320x320',
   })
+}
+
+async function resizeThumb(inputPath: string, outputPath: string) {
+  await sharp(inputPath)
+    .resize({ width: 320, height: 320, fit: sharp.fit.contain })
+    .toFormat('jpeg')
+    .toFile(outputPath)
+  return outputPath
 }

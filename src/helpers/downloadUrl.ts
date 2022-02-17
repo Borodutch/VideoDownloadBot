@@ -66,7 +66,6 @@ export default async function downloadUrl(
       downloadJob.originalChatId
     )
     const thumb = await getThumbnailUrl(downloadedFileInfo, filePath)
-    console.log('Превью получено')
     const fileId = await sendCompletedFile(
       downloadJob.originalChatId,
       downloadJob.originalMessageId,
@@ -77,12 +76,9 @@ export default async function downloadUrl(
       thumb ? new InputFile(thumb) : undefined
     )
     // Cleanup
-    try {
-      await unlincSyncSafe(filePath)
-      await unlincSyncSafe(thumb)
-    } catch (error) {
-      report(error, { location: 'deleting downloaded file' })
-    }
+    await unlincSyncSafe(filePath)
+    await unlincSyncSafe(thumb)
+
     // Finished
     await findOrCreateUrl(
       downloadJob.url,

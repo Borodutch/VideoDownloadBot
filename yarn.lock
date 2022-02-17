@@ -188,13 +188,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/ffmpeg-static@npm:^3.0.1":
-  version: 3.0.1
-  resolution: "@types/ffmpeg-static@npm:3.0.1"
-  checksum: 1c7af102b5dc3b1679e5336dabf915f6fc8b3320473635a4359a53530e525f7c23aee316b56a37bb803d82a6382722d8ad8c31695f7c5ea15961b32d747a265e
-  languageName: node
-  linkType: hard
-
 "@types/fluent-ffmpeg@npm:^2.1.20":
   version: 2.1.20
   resolution: "@types/fluent-ffmpeg@npm:2.1.20"
@@ -4397,7 +4390,6 @@ __metadata:
     "@grammyjs/menu": ^1.0.4
     "@grammyjs/runner": ^1.0.3
     "@typegoose/typegoose": ^9.3.1
-    "@types/ffmpeg-static": ^3.0.1
     "@types/fluent-ffmpeg": ^2.1.20
     "@types/js-yaml": ^4.0.5
     "@types/lodash": ^4.14.178
