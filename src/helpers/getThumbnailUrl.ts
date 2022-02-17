@@ -25,7 +25,6 @@ export default async function getThumbnailUrl(
     }
   }
   let thumbnailPath = ''
-  thumbnailUrl = ''
   if (!thumbnailUrl) {
     const thumbName = `${thumbnailUuid}.jpeg`
     thumbnailPath = resolve(tempDir, thumbName)
