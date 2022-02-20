@@ -34,4 +34,4 @@ MIT — use for any purpose. Would be great if you could leave a note about the 
 
 # CD
 
-`main` branch gets deployed to [@VideoDownloadBot](https://t.me/VideoDownloadBot) automagically with [ci-ninja](https://t.me/backmeupplz/ci-ninja).
+`main` branch gets deployed to [@VideoDownloadBot](https://t.me/VideoDownloadBot) automagically with [ci-ninja](https://github.com/backmeupplz/ci-ninja).
