@@ -24,15 +24,17 @@ export default async function getThumbnailUrl(
       break
     }
   }
+
+  const outputPath = resolve(tempDir, `${thumbnailUuid}-done.jpeg`)
   let thumbnailPath = ''
   if (!thumbnailUrl) {
     const thumbName = `${thumbnailUuid}.jpeg`
     thumbnailPath = resolve(tempDir, thumbName)
     await makeThumbnail(videoPath, thumbName)
-    return thumbnailPath
+    const thumbPathDone = await resizeThumb(thumbnailPath, outputPath)
+    return thumbPathDone
   }
 
-  const outputPath = resolve(tempDir, `${thumbnailUuid}-done.jpeg`)
   thumbnailPath = await downloadThumbnail(thumbnailUrl, thumbnailUuid)
   const thumbPathDone = await resizeThumb(thumbnailPath, outputPath)
   unlincSyncSafe(thumbnailPath)
@@ -49,11 +51,18 @@ async function downloadThumbnail(url: string, id: string) {
   return path
 }
 
-async function makeThumbnail(videoPath: string, filename: string) {
-  await ffmpeg(videoPath).thumbnail({
-    timestamps: ['50%'],
-    filename,
-    folder: tempDir,
+function makeThumbnail(videoPath: string, filename: string) {
+  return new Promise((resolve, rej) => {
+    ffmpeg(videoPath)
+      .thumbnail({
+        timestamps: ['50%'],
+        filename,
+        folder: tempDir,
+      })
+      .on('error', (error) => {
+        rej(error)
+      })
+      .on('end', () => resolve('Done'))
   })
 }
 
