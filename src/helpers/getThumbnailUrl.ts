@@ -24,7 +24,7 @@ export default async function getThumbnailUrl(
       break
     }
   }
-  thumbnailUrl = ''
+
   let thumbnailPath = ''
   if (!thumbnailUrl) {
     const thumbName = `${thumbnailUuid}.jpeg`
