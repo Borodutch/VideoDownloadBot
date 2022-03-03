@@ -6,7 +6,6 @@ import { findOrCreateChat } from '@/models/Chat'
 import { findOrCreateUrl } from '@/models/Url'
 import { omit } from 'lodash'
 import { resolve } from 'path'
-import { unlinkSync } from 'fs'
 import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
@@ -15,6 +14,7 @@ import env from '@/helpers/env'
 import getThumbnailUrl from '@/helpers/getThumbnailUrl'
 import report from '@/helpers/report'
 import sendCompletedFile from '@/helpers/sendCompletedFile'
+import unlincSyncSafe from '@/helpers/unlincSyncSafe'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const youtubedl = require('@borodutch-labs/yt-dlp-exec')
@@ -47,7 +47,6 @@ export default async function downloadUrl(
       noPart: true,
       cookies: resolve(cwd(), 'cookie'),
       recodeVideo: 'mp4',
-      embedThumbnail: true,
     }
     const downloadedFileInfo: DownloadedFileInfo = await youtubedl(
       downloadJob.url,
@@ -66,7 +65,7 @@ export default async function downloadUrl(
     const { doc: originalChat } = await findOrCreateChat(
       downloadJob.originalChatId
     )
-    const thumb = getThumbnailUrl(downloadedFileInfo)
+    const thumb = await getThumbnailUrl(downloadedFileInfo, filePath)
     const fileId = await sendCompletedFile(
       downloadJob.originalChatId,
       downloadJob.originalMessageId,
@@ -74,14 +73,12 @@ export default async function downloadUrl(
       downloadJob.audio,
       escapedTitle,
       file,
-      thumb ? new InputFile({ url: thumb }) : undefined
+      thumb ? new InputFile(thumb) : undefined
     )
     // Cleanup
-    try {
-      await unlinkSync(filePath)
-    } catch (error) {
-      report(error, { location: 'deleting downloaded file' })
-    }
+    await unlincSyncSafe(filePath)
+    await unlincSyncSafe(thumb)
+
     // Finished
     await findOrCreateUrl(
       downloadJob.url,
