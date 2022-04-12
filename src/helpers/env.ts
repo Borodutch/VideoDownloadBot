@@ -10,5 +10,5 @@ export default cleanEnv(process.env, {
   TOKEN: str(),
   MONGO: str(),
   ADMIN_ID: num(),
-  BOT_API_URL: str({ default: 'http://localhost:8081' }),
+  BOT_API_URL: str({ default: 'https://api.telegram.org' }),
 })
