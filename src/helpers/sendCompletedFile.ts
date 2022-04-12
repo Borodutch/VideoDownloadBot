@@ -21,6 +21,7 @@ export default async function sendCompletedFile(
     parse_mode: 'HTML' as const,
     reply_to_message_id: messageId,
     thumb: audio ? undefined : thumb,
+    supports_streaming: true,
   }
   let sentMessage:
     | Message.DocumentMessage
