@@ -22,7 +22,7 @@ download_complete: 🎉 Download complete!
 # Caption for completed video
 video_caption: |
   <b>${title}</b>
-  Downloaded with @${bot} — <a href="https://www.ua2canada.info/">Info on moving from 🇺🇦 to 🇨🇦</a>
+  Downloaded with @${bot} — <a href="https://wdlaty.com">Check out my book</a>
 # Errors
 error_cannot_start_download: 😱 I couldn't start the download.
 error_invalid_url: 😱 I couldn't find a video with that link.
