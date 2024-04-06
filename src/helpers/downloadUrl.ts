@@ -17,7 +17,7 @@ import sendCompletedFile from '@/helpers/sendCompletedFile'
 import unlincSyncSafe from '@/helpers/unlincSyncSafe'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const youtubedl = require('@borodutch-labs/yt-dlp-exec')
+const youtubedl = require('youtube-dl-exec')
 
 export default async function downloadUrl(
   downloadJob: DocumentType<DownloadJob>

@@ -14,7 +14,6 @@
     "lint": "yarn pretty && eslint --max-warnings 0 --ext ts,tsx,json src"
   },
   "dependencies": {
-    "@borodutch-labs/yt-dlp-exec": "^2.0.0",
     "@grammyjs/i18n": "^0.5.0",
     "@grammyjs/menu": "^1.0.4",
     "@grammyjs/runner": "^1.0.3",
@@ -30,7 +29,8 @@
     "rimraf": "^3.0.2",
     "sharp": "^0.30.0",
     "turbo-downloader": "^1.0.9",
-    "uuid": "^8.3.2"
+    "uuid": "^8.3.2",
+    "youtube-dl-exec": "^2.5.8"
   },
   "devDependencies": {
     "@types/fluent-ffmpeg": "^2.1.20",
