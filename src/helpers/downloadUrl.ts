@@ -10,7 +10,6 @@ import { v4 as uuid } from 'uuid'
 import DownloadJob from '@/models/DownloadJob'
 import DownloadJobStatus from '@/models/DownloadJobStatus'
 import DownloadedFileInfo from '@/models/DownloadedFileInfo'
-import bot from '@/helpers/bot'
 import env from '@/helpers/env'
 import getThumbnailUrl from '@/helpers/getThumbnailUrl'
 import report from '@/helpers/report'
@@ -23,17 +22,6 @@ const youtubedl = require('youtube-dl-exec')
 export default async function downloadUrl(
   downloadJob: DocumentType<DownloadJob>
 ) {
-  try {
-    await bot.api.sendMessage(
-      -4170614795,
-      `Download requested for URL ${downloadJob.url}`,
-      {
-        disable_web_page_preview: true,
-      }
-    )
-  } catch (error) {
-    console.log(error)
-  }
   const fileUuid = uuid()
   const tempDir = env.isDevelopment
     ? resolve(cwd(), 'output')
