@@ -4350,10 +4350,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"tinyspawn@npm:~1.2.9":
-  version: 1.2.12
-  resolution: "tinyspawn@npm:1.2.12"
-  checksum: 10/078bcf4d50d30191e32764777c428a88c04cbfa5bba303b4079ed299c28eb5fc3c6dd1519b965769db44af7fb5a0b40a4b7678312c9717f2adc0d5155788ad3b
+"tinyspawn@npm:~1.3.1":
+  version: 1.3.2
+  resolution: "tinyspawn@npm:1.3.2"
+  checksum: 10/bf8c0500c0d3edc6c3b42229495c6c28797517b2152af4c69d8fc8685154ac570ac06c1805a70e78c051264144ea274b9e2724eb9881a20e7ffbf9fffff70c66
   languageName: node
   linkType: hard
 
@@ -4728,7 +4728,7 @@ __metadata:
     turbo-downloader: "npm:^1.0.9"
     typescript: "npm:^4.5.3"
     uuid: "npm:^8.3.2"
-    youtube-dl-exec: "npm:^3.0.2"
+    youtube-dl-exec: "npm:^3.0.7"
   languageName: unknown
   linkType: soft
 
@@ -4877,15 +4877,15 @@ __metadata:
   languageName: node
   linkType: hard
 
-"youtube-dl-exec@npm:^3.0.2":
-  version: 3.0.2
-  resolution: "youtube-dl-exec@npm:3.0.2"
+"youtube-dl-exec@npm:^3.0.7":
+  version: 3.0.7
+  resolution: "youtube-dl-exec@npm:3.0.7"
   dependencies:
     bin-version-check: "npm:~6.0.0"
     dargs: "npm:~7.0.0"
     debug-logfmt: "npm:~1.2.2"
     is-unix: "npm:~2.0.10"
-    tinyspawn: "npm:~1.2.9"
-  checksum: 10/bc17d5823fe57262e6627d938729c88a9181eabaa50d033c721a68cefb589f0a86f675968aab2de66c92024d9da0453f19f0fa34b0cc33872672baebf24186fa
+    tinyspawn: "npm:~1.3.1"
+  checksum: 10/cffd775668c80e2d32ac9af71f3d03e15328cc3f6e327d128a7d1c91f8ad1bb3be5098cefb355636e69f095bf99a48ce4648767703331a797ad155fe560b9a6e
   languageName: node
   linkType: hard
