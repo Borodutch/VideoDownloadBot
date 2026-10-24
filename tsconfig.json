@@ -1,19 +1,11 @@
 {
   "compilerOptions": {
-    "module": "commonjs",
-    "target": "esnext",
-    "lib": ["es2015"],
-    "moduleResolution": "node",
-    "sourceMap": true,
-    "outDir": "dist",
-    "baseUrl": "src",
-    "paths": {
-      "@/*": ["*"]
-    },
-    "emitDecoratorMetadata": true,
-    "experimentalDecorators": true,
-    "useUnknownInCatchVariables": true,
-    "strict": true
-  },
-  "include": ["src/**/*"]
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["bun"]
+  }
 }

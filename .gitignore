@@ -1,15 +1,4 @@
 node_modules
-dist
+data
 .env
-*.log
-output
-cookie
-
-# yarn
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/sdks
-!.yarn/versions
+cookies.txt
