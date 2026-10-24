@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import { copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { egressProxy, proxyFreeEnv } from './egress'
 import { type Key, t } from './i18n'
 
 const env = process.env
@@ -15,12 +16,26 @@ const COOKIES = env.COOKIES || '/cookies.txt'
 const DATA = env.DATA_DIR || './data'
 const TMP = join(tmpdir(), 'videodownloadbot')
 const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 3)
-const YTDLP = [
+// Only formats whose every request goes through the proxy: yt-dlp's own HTTP
+// (HLS, DASH, websockets) and ffmpeg's http(s), which yt-dlp hands the proxy
+// to. rtmp, rtsp and mms would connect directly.
+const PROTOCOLS = `[protocol~='^(https?|m3u8(_native)?|http_dash_segments(_generator)?|f4m|ism|websocket_frag)$']`
+// ffmpeg's http input lets a response turn into rtp/udp/rtsp (an SDP or a
+// playlist pointing there), which would skip the proxy: keep it to these.
+// Local files (merger, thumbnail) already default to file,crypto,data.
+const FFMPEG_PROTOCOLS = 'http,https,tls,tcp,httpproxy,crypto,data'
+// tcp and tls stay listed for http(s), but some demuxers (IMF, from an XML
+// response) open such URLs on their own, direct: only HLS and its segments
+const FFMPEG_FORMATS = 'hls,mpegts,mov,matroska,aac,mp3,flv,ac3,eac3,webvtt'
+
+export const YTDLP = [
   '--no-playlist',
   '--playlist-items', '1',
   '--no-warnings',
   '--js-runtimes', 'bun',
-  '-f', 'bv*+ba/b',
+  '-f', `bv*${PROTOCOLS}+ba${PROTOCOLS}/b${PROTOCOLS}`,
+  '--downloader-args',
+  `ffmpeg_i:-protocol_whitelist ${FFMPEG_PROTOCOLS} -format_whitelist ${FFMPEG_FORMATS}`,
   // h264/aac plays inline on every Telegram client
   '-S', 'vcodec:h264,res:1080,acodec:m4a',
   '--merge-output-format', 'mp4',
@@ -81,8 +96,8 @@ export function links(msg: Message, username: string, guest = false) {
 
 // First line against links into the docker network: no IP literals (the URL
 // parser normalizes 2130706433 and 0x7f.1 to 127.0.0.1), no dotless service
-// names, no local-only TLDs. Redirects can still get there: that needs an
-// egress restriction outside the bot (agentboard #187).
+// names, no local-only TLDs. Redirects and public names that resolve inside
+// are stopped by the egress proxy yt-dlp goes through (egress.ts).
 function isPublic(host: string) {
   host = host.replace(/\.$/, '') // "name." is the same docker service
   return (
@@ -93,8 +108,15 @@ function isPublic(host: string) {
   )
 }
 
+let proxy: Promise<string> | undefined
 async function ytdlp(args: string[]) {
-  const p = Bun.spawn(['yt-dlp', ...args], {
+  // a failed listen isn't kept: the next download tries again
+  proxy ??= egressProxy().catch((e) => {
+    proxy = undefined
+    throw e
+  })
+  const p = Bun.spawn(['yt-dlp', '--proxy', await proxy, ...args], {
+    env: proxyFreeEnv(),
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: 30 * 60_000,
@@ -500,6 +522,8 @@ function main() {
 }
 
 if (import.meta.main) {
+  if (!env.EGRESS_DENY?.trim())
+    console.warn("EGRESS_DENY is empty: the host's own public addresses are reachable")
   await rm(TMP, { recursive: true, force: true })
   await mkdir(TMP, { recursive: true })
   await mkdir(DATA, { recursive: true })

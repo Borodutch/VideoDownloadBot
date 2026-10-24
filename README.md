@@ -20,6 +20,7 @@ Needs `yt-dlp` and `ffmpeg` on PATH (the Dockerfile ships both). `bun test` runs
 - `STORAGE_CHAT`: chat the bot uploads guest-mode videos to before putting them into its guest reply (each upload is deleted right away), default `ADMIN_ID` (guest replies fail without either)
 - `DATA_DIR`: where `bot.sqlite` lives, default `./data` (`/data` in Docker)
 - `MAX_DOWNLOADS`: parallel downloads, default 3
+- `EGRESS_DENY`: comma-separated addresses or CIDRs (IPv4 and IPv6) that yt-dlp may never reach, on top of the private, loopback and link-local ranges it's always kept out of. **Set it on deploy to the server's own public IPv4 address and IPv6 prefix** (e.g. `1.2.3.4/32,2a01:4f8:c0c:1::/64`). Those addresses look public, but they lead to every port docker publishes on the host (the panel, the reverse proxy's internal routes), and a cloud firewall doesn't filter traffic that starts on the host. If docker gives containers global IPv6 addresses from a routed prefix outside the host's /64, list that prefix too. A malformed entry stops the bot at startup
 
 In groups the bot needs privacy mode off (BotFather → Bot Settings → Group Privacy) or admin rights to see links. Replying to a message with a link and mentioning the bot (`@VideoDownloadBot`) downloads the replied-to link. With Guest Mode on (BotFather Mini App → bot settings), the same mention works in any chat, even ones the bot isn't in.
 

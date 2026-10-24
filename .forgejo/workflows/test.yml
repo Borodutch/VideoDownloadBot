@@ -14,5 +14,14 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
+      # the egress tests drive the real yt-dlp and ffmpeg the image ships
+      - run: |
+          if [ "$(id -u)" = 0 ]; then S=; else S=sudo; fi
+          $S apt-get update -qq
+          $S apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null
+          mkdir -p bin
+          curl -fsSL -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp_linux
+          chmod +x bin/yt-dlp
+          echo "$PWD/bin" >> "$GITHUB_PATH"
       - run: bunx -p typescript tsc
       - run: bun test
