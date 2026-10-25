@@ -597,8 +597,10 @@ function main() {
   }
   setInterval(keepalive, 6 * 3600_000)
   void keepalive()
-  process.once('SIGTERM', () => bot.stop())
-  process.once('SIGINT', () => bot.stop())
+  // exit once polling stops: timers keep Bun alive, and Docker would wait 30 s to kill it
+  const stop = () => bot.stop().finally(() => process.exit())
+  process.once('SIGTERM', stop)
+  process.once('SIGINT', stop)
   return update().then(() =>
     bot.start({
       allowed_updates: ['message', 'guest_message', 'my_chat_member'],
