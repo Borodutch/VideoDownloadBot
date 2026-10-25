@@ -53,11 +53,51 @@ type Dest = { chat: number | string; reply?: number; sent?: number }
 const STORAGE = env.STORAGE_CHAT || env.ADMIN_ID
 
 // Thrown with the message to show; null = not a video, stay quiet in groups
-class Fail extends Error {
+export class Fail extends Error {
   constructor(public key: Key | null, why = key ?? 'not a video') {
     super(why)
   }
 }
+
+// News sites' extractors, which claim plain article URLs (not their video,
+// live and embed pages)
+const NEWS = /^(?!.*(video|live|embed)).*(article|news)|^(bbc|cnn|spiegel|voxmedia|lenta)$/i
+
+// Whether a yt-dlp error means the page has no video rather than a video
+// that failed: the generic extractor on any page (no such site, 403, nothing
+// embedded) or a site saying so. Not getting or not parsing the page only
+// counts from a news extractor (NYT, Spiegel, Vox on an article without
+// media); on a video site it's a real failure. Crashes carry no [extractor]
+// tag, so ies = the extractors that claim the link.
+export function notVideo(why: string, ies: string[] = []) {
+  if (/unsupported url|no video|no media|media blocks|\[generic\]/i.test(why))
+    return true
+  if (!/unable to (download webpage|extract|find)|extractor error has occurred/i.test(why))
+    return false
+  const tag = why.match(/^(?:ERROR: )?\[([^\]]+)\]/)?.[1]
+  const by = tag ? [tag] : ies
+  return by.length > 0 && by.every((ie) => NEWS.test(ie))
+}
+
+// The video in what yt-dlp -J printed, or Fail(null) when there is none
+export function picked(info: any) {
+  // yt-dlp prints null when the page had nothing (a t.me text post)
+  if (!info) throw new Fail(null, 'nothing extracted')
+  // YouTube playlists, channels and feeds (WL, LL, history) would hand out
+  // what the logged-in cookies can see; --no-playlist already reduces
+  // watch?v=…&list=… to the video. Multi-video posts elsewhere stay.
+  if (info._type === 'playlist' && /^youtube/i.test(info.extractor_key))
+    throw new Fail(null, 'youtube playlist')
+  // an article page without media is an empty playlist (BBC, CNN)
+  if (info._type === 'playlist' && !info.entries?.[0])
+    throw new Fail(null, 'empty playlist')
+  return info.entries?.[0] ?? info
+}
+
+// What to tell the chat about a failed link, null = nothing. "Not a video"
+// only gets an answer from whoever asked the bot itself.
+export const answer = (key: Key | null, chat: string, called: boolean) =>
+  key ?? (chat === 'private' || called ? 'failed' : null)
 
 export function urls(msg: Message) {
   const text = msg.text ?? msg.caption ?? ''
@@ -84,14 +124,53 @@ export function urls(msg: Message) {
   ]
 }
 
-// Also the links in the message replied to when the bot is summoned: by an
-// @mention, or in a guest message
+// Called on: by an @mention, or in a guest message
+export const summoned = (msg: Message, username: string, guest = false) =>
+  guest || new RegExp(`@${username}\\b`, 'i').test(msg.text ?? msg.caption ?? '')
+
+// Also the links in the message replied to when the bot is summoned
 export function links(msg: Message, username: string, guest = false) {
-  const summoned =
-    guest ||
-    new RegExp(`@${username}\\b`, 'i').test(msg.text ?? msg.caption ?? '')
-  const reply = summoned ? msg.reply_to_message : undefined
+  const reply = summoned(msg, username, guest) ? msg.reply_to_message : undefined
   return [...new Set([...urls(msg), ...(reply ? urls(reply) : [])])]
+}
+
+// Extractors that claim links without being a site's video extractor: the
+// generic one takes any page, the others only refuse (Spotify, Netflix, …)
+const NOT_SITES = new Set(['generic', 'DRM', 'Piracy', 'Liability'])
+
+// Each link's own-site yt-dlp extractors. Decided from the URLs alone,
+// nothing is fetched: --list-extractors prints each extractor with the URLs
+// it matches below it.
+export async function claims(urls: string[]) {
+  const by = new Map<string, string[]>()
+  if (!urls.length) return by
+  const { out } = await check(() => ytdlp(['--list-extractors', '--', ...urls]))
+  let ie = ''
+  for (const line of out.split('\n'))
+    if (!line.startsWith(' ')) ie = line.replace(/ \(CURRENTLY BROKEN\)$/, '')
+    else if (!NOT_SITES.has(ie)) by.set(line.trim(), [...(by.get(line.trim()) ?? []), ie])
+  return by
+}
+
+// The links a site's own extractor claims
+export async function videos(urls: string[]) {
+  const by = await claims(urls)
+  return urls.filter((u) => by.has(u))
+}
+
+// What a message asks to download. In groups a link mentioned in passing
+// (a bare domain, an article) isn't a request: unless the bot is summoned,
+// only links to a site yt-dlp knows count.
+export async function requested(
+  msg: Message,
+  username: string,
+  chat: string,
+  video = videos,
+) {
+  const found = links(msg, username)
+  return chat === 'private' || summoned(msg, username) || !found.length
+    ? found
+    : video(found)
 }
 
 // First line against links into the docker network: no IP literals (the URL
@@ -130,19 +209,26 @@ async function ytdlp(args: string[]) {
   return { out, err }
 }
 
-let running = 0
-const queue: (() => void)[] = []
-async function slot<T>(fn: () => Promise<T>) {
-  if (running < MAX_DOWNLOADS) running++
-  else await new Promise<void>((r) => queue.push(r))
-  try {
-    return await fn()
-  } finally {
-    const next = queue.shift()
-    if (next) next()
-    else running--
+// Runs at most max fns at once, the rest wait their turn
+function limit(max: number) {
+  let running = 0
+  const queue: (() => void)[] = []
+  return async <T>(fn: () => Promise<T>) => {
+    if (running < max) running++
+    else await new Promise<void>((r) => queue.push(r))
+    try {
+      return await fn()
+    } finally {
+      const next = queue.shift()
+      if (next) next()
+      else running--
+    }
   }
 }
+const slot = limit(MAX_DOWNLOADS)
+// group links are checked one yt-dlp run per message: a flood of them
+// queues instead of forking a process each
+const check = limit(2)
 
 // The live cookie jar sits on the data volume, so the session cookies Google
 // rotates survive restarts. COOKIES only seeds it, again whenever it changes.
@@ -286,18 +372,13 @@ function main() {
         json = (await ytdlp([...args, '-J', url])).out
       } catch (e) {
         const why = String((e as Error).message)
-        throw new Fail(
-          /unsupported url|no video|no media/i.test(why) ? null : 'failed',
-          why,
-        )
+        // an untagged error needs the extractors that claim the link
+        const ies = /^(ERROR: )?\[/.test(why)
+          ? []
+          : ((await claims([url]).catch(() => undefined))?.get(url) ?? [])
+        throw new Fail(notVideo(why, ies) ? null : 'failed', why)
       }
-      const info = JSON.parse(json)
-      // YouTube playlists, channels and feeds (WL, LL, history) would hand out
-      // what the logged-in cookies can see; --no-playlist already reduces
-      // watch?v=…&list=… to the video. Multi-video posts elsewhere stay.
-      if (info._type === 'playlist' && /^youtube/i.test(info.extractor_key))
-        throw new Fail(null, 'youtube playlist')
-      const v = info.entries?.[0] ?? info
+      const v = picked(JSON.parse(json))
       if (v.is_live) throw new Fail('failed', 'live stream')
       const id = `${v.extractor_key}:${v.id}`
       const hit = get.get(id)
@@ -413,10 +494,13 @@ function main() {
       if (statusId)
         await ctx.api.deleteMessage(ctx.chat!.id, statusId).catch(() => {})
     } catch (e) {
-      const key = e instanceof Fail ? e.key : 'failed'
       console.error('failed', url, (e as Error).message)
-      if (key || ctx.chat?.type === 'private')
-        await status(key ?? 'failed').catch(() => {})
+      const key = answer(
+        e instanceof Fail ? e.key : 'failed',
+        ctx.chat!.type,
+        summoned(ctx.msg!, ctx.me.username),
+      )
+      if (key) await status(key).catch(() => {})
     }
   }
 
@@ -465,7 +549,9 @@ function main() {
   bot.on('message', (ctx) => {
     const found = links(ctx.msg, ctx.me.username)
     // handlers run detached so one long download doesn't block the next update
-    for (const url of found) void handle(ctx, url)
+    void requested(ctx.msg, ctx.me.username, ctx.chat.type)
+      .then((wanted) => wanted.forEach((url) => void handle(ctx, url)))
+      .catch(console.error)
     if (!found.length && ctx.chat.type === 'private')
       return ctx.reply(t(ctx.from.language_code, 'help'))
   })

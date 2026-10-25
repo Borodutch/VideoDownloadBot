@@ -1,6 +1,16 @@
 import { expect, test } from 'bun:test'
 import type { Message } from 'grammy/types'
-import { links, urls } from './bot'
+import {
+  answer,
+  claims,
+  Fail,
+  links,
+  notVideo,
+  picked,
+  requested,
+  urls,
+  videos,
+} from './bot'
 import { lang } from './i18n'
 
 test('urls: entities, text links, bare domains, dedupe, non-http dropped', () => {
@@ -72,3 +82,124 @@ test('links: replied-to links only when summoned', () => {
   expect(links(ask('@vidbotx'), 'vidbot')).toEqual([])
   expect(links(ask('hey'), 'vidbot', true)).toEqual(['https://youtu.be/a'])
 })
+
+const said = (text: string) => {
+  const found = [...text.matchAll(/\S+\.\S+/g)].filter((m) => !m[0].startsWith('@'))
+  return {
+    text,
+    entities: found.map((m) => ({ type: 'url', offset: m.index, length: m[0].length })),
+  } as Message
+}
+const youtube = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+const tiktok = 'https://www.tiktok.com/@scout2015/video/6718335390845095173'
+const article = 'https://github.com/yt-dlp/yt-dlp/blob/master/README.md'
+
+test('requested: unless summoned, groups only check links with yt-dlp', async () => {
+  const checked: string[][] = []
+  const video = async (u: string[]) => (checked.push(u), u.slice(1))
+  const msg = said('tugport.com and youtu.be/x')
+  expect(await requested(msg, 'vidbot', 'group', video)).toEqual(['https://youtu.be/x'])
+  expect(checked).toEqual([['https://tugport.com/', 'https://youtu.be/x']])
+  for (const [m, chat] of [
+    [msg, 'private'],
+    [said('tugport.com @VidBot'), 'supergroup'],
+    [said('no links here'), 'group'],
+  ] as const)
+    expect(await requested(m, 'vidbot', chat, video)).toEqual(links(m, 'vidbot'))
+  expect(checked.length).toBe(1)
+})
+
+// yt-dlp's last stderr line (and the link's extractors, which only matter
+// for untagged errors) for pages that have no video, mostly seen live...
+const crash = "ERROR: a: An extractor error has occurred. (caused by KeyError('initialData')); please report this issue"
+const empty: [string, string[]?][] = [
+  ['ERROR: [generic] Unable to download webpage: <urlopen error [Errno -2] Name or service not known>'],
+  ['ERROR: Unsupported URL: https://tugport.com/'],
+  ['ERROR: [NYTimesArticle] a: Unable to extract any media blocks from webpage'],
+  [crash, ['NYTimesArticle']],
+  ['ERROR: [NYTimesArticle] a: Unable to download webpage: HTTP Error 403: Forbidden'],
+  ['ERROR: [CNN] 2023/04/14/a: Unable to download webpage: HTTP Error 403: Forbidden'],
+  ['ERROR: [Spiegel] 042c: Unable to extract media id; please report this issue'],
+  ['ERROR: [VoxMedia] foo: Unable to find provider video id'],
+  ['ERROR: [cbsnews] a: No video content was found'],
+  ['ERROR: [washingtonpost:article] a: Unable to download webpage: HTTP Error 404: Not Found'],
+]
+// ...and for videos that failed
+const broken: [string, string[]?][] = [
+  ['ERROR: [youtube] dQw4w9WgXcQ: Video unavailable. This video is private'],
+  ["ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot"],
+  ['ERROR: [TikTok] 671: Requested format is not available'],
+  ['ERROR: [TikTok] 671: Unable to extract universal data for rehydration'],
+  ['ERROR: [TikTok] 671: Unable to download webpage: HTTP Error 403: Forbidden'],
+  ['ERROR: [Instagram] C1: Unable to download webpage: HTTP Error 429: Too Many Requests'],
+  ['ERROR: [cbsnews:livevideo] a: Unable to download webpage: HTTP Error 403: Forbidden'],
+  [crash, ['youtube']],
+  [crash, ['FoxNewsVideo']],
+  [crash, ['NYTimesArticle', 'youtube']],
+  [crash],
+]
+
+test('notVideo: no-media pages vs failed videos', () => {
+  for (const [why, ies] of empty) expect(notVideo(why, ies)).toBe(true)
+  for (const [why, ies] of broken) expect(notVideo(why, ies)).toBe(false)
+})
+
+const key = (f: () => unknown) => {
+  try {
+    f()
+  } catch (e) {
+    return e instanceof Fail ? e.key : e
+  }
+  return 'no throw'
+}
+
+test('picked: nothing, empty and YouTube playlists are not a video', () => {
+  expect(key(() => picked(null))).toBeNull()
+  expect(key(() => picked({ _type: 'playlist', extractor_key: 'BBC', entries: [] }))).toBeNull()
+  expect(key(() => picked({ _type: 'playlist', extractor_key: 'CNN' }))).toBeNull()
+  expect(key(() => picked({ _type: 'playlist', extractor_key: 'YoutubeTab', entries: [{ id: 'a' }] }))).toBeNull()
+  expect(picked({ _type: 'playlist', extractor_key: 'BBC', entries: [{ id: 'a' }] })).toEqual({ id: 'a' })
+  expect(picked({ id: 'v', extractor_key: 'Youtube' })).toEqual({ id: 'v', extractor_key: 'Youtube' })
+})
+
+test('answer: groups only hear about real failures unless they asked', () => {
+  // what job() throws for a no-video page in a group stays unanswered...
+  for (const [why, ies] of empty)
+    expect(answer(notVideo(why, ies) ? null : 'failed', 'group', false)).toBeNull()
+  expect(answer(key(() => picked(null)) as null, 'supergroup', false)).toBeNull()
+  // ...but private chats and summons hear it
+  expect(answer(null, 'private', false)).toBe('failed')
+  expect(answer(null, 'group', true)).toBe('failed')
+  // a recognized video that failed is reported everywhere
+  for (const [why, ies] of broken)
+    expect(answer(notVideo(why, ies) ? null : 'failed', 'group', false)).toBe('failed')
+  expect(answer('tooBig', 'supergroup', false)).toBe('tooBig')
+})
+
+// CI installs yt-dlp; elsewhere this only runs where it is
+test.skipIf(!Bun.which('yt-dlp') && !process.env.CI)(
+  'requested: plain sites stay quiet in groups, video sites and summons do not',
+  async () => {
+    const group = (text: string) => requested(said(text), 'vidbot', 'group')
+    expect(await group('tugport.com запущу скоро')).toEqual([])
+    expect(await group(`read ${article}`)).toEqual([])
+    expect(await group(`${youtube} lol ${tiktok} tugport.com`)).toEqual([youtube, tiktok])
+    // news extractors claim articles: these get a yt-dlp run, and picked(),
+    // notVideo() and answer() keep a page without media quiet
+    const bbc = 'https://www.bbc.com/news/articles/c123'
+    expect(await group(`see ${bbc}`)).toEqual([bbc])
+    // what an untagged crash is judged by
+    const nyt = 'https://www.nytimes.com/2024/01/01/world/a.html'
+    const by = await claims([nyt, youtube, 'https://tugport.com/'])
+    expect([...by]).toEqual([[nyt, ['NYTimesArticle']], [youtube, ['youtube']]])
+    expect(notVideo(crash, by.get(nyt))).toBe(true)
+    expect(notVideo(crash, by.get(youtube))).toBe(false)
+    const spotify = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC'
+    expect(await videos([tiktok, 'https://tugport.com/', spotify, youtube])).toEqual([tiktok, youtube])
+    expect(await group('@VidBot tugport.com')).toEqual(['https://tugport.com/'])
+    expect(
+      await requested(said(`tugport.com ${article}`), 'vidbot', 'private'),
+    ).toEqual(['https://tugport.com/', article])
+  },
+  30_000,
+)
