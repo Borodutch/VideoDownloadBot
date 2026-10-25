@@ -6,6 +6,7 @@ import { copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { egressProxy, proxyFreeEnv } from './egress'
+import { pollWithHandover } from './handover'
 import { type Key, t } from './i18n'
 
 const env = process.env
@@ -285,6 +286,12 @@ function main() {
     client: { apiRoot: API, timeoutSeconds: 3600 },
   })
   const jobs = new Map<string, Promise<File>>()
+  // Handlers run detached; counted so a deploy lets the running ones finish
+  let running = 0
+  const track = (p: Promise<unknown>) => {
+    running++
+    return p.finally(() => running--)
+  }
 
   async function send(
     dest: Dest,
@@ -549,13 +556,15 @@ function main() {
   bot.on('message', (ctx) => {
     const found = links(ctx.msg, ctx.me.username)
     // handlers run detached so one long download doesn't block the next update
-    void requested(ctx.msg, ctx.me.username, ctx.chat.type)
-      .then((wanted) => wanted.forEach((url) => void handle(ctx, url)))
-      .catch(console.error)
+    void track(
+      requested(ctx.msg, ctx.me.username, ctx.chat.type)
+        .then((wanted) => wanted.forEach((url) => void track(handle(ctx, url))))
+        .catch(console.error),
+    )
     if (!found.length && ctx.chat.type === 'private')
       return ctx.reply(t(ctx.from.language_code, 'help'))
   })
-  bot.on('guest_message', (ctx) => void guest(ctx).catch(console.error))
+  bot.on('guest_message', (ctx) => void track(guest(ctx).catch(console.error)))
   bot.on('my_chat_member', (ctx) => {
     const was = ctx.myChatMember.old_chat_member.status
     const now = ctx.myChatMember.new_chat_member.status
@@ -595,17 +604,23 @@ function main() {
       await rm(dir, { recursive: true, force: true })
     }
   }
-  setInterval(keepalive, 6 * 3600_000)
-  void keepalive()
-  // exit once polling stops: timers keep Bun alive, and Docker would wait 30 s to kill it
-  const stop = () => bot.stop().finally(() => process.exit())
-  process.once('SIGTERM', stop)
-  process.once('SIGINT', stop)
+  // Polling and the shared cookie jar's keepalive run only on the container
+  // holding the polling lock; bot.stop() confirms the fetched updates
   return update().then(() =>
-    bot.start({
-      allowed_updates: ['message', 'guest_message', 'my_chat_member'],
-      onStart: (me) => console.log(`@${me.username} up, uploads ≤ ${LIMIT >> 20} MB`),
-    }),
+    pollWithHandover(
+      () => {
+        setInterval(keepalive, 6 * 3600_000)
+        void keepalive()
+        return bot.start({
+          allowed_updates: ['message', 'guest_message', 'my_chat_member'],
+          onStart: (me) => console.log(`@${me.username} up, uploads ≤ ${LIMIT >> 20} MB`),
+        })
+      },
+      () => bot.stop(),
+      async () => {
+        while (running) await Bun.sleep(100)
+      },
+    ),
   )
 }
 
