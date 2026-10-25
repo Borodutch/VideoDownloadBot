@@ -5,17 +5,37 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Our own PRs and pushes run on the Mac runners; outsiders' PRs (AGit via the github bot) stay on Linux
+    runs-on: ${{ (github.event_name != 'pull_request' || contains(fromJSON('["backmeupplz","renovate","claude"]'), github.event.pull_request.user.login)) && 'macos-latest' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: https://github.com/oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
-      # the egress tests drive the real yt-dlp and ffmpeg the image ships
-      - run: |
+      # The egress tests drive the real yt-dlp and ffmpeg the image ships (yt-dlp nightly). The Mac uses Homebrew's
+      # ffmpeg and keeps the nightly yt-dlp in its tool cache, refreshed daily: the Python zipapp, since the one-file
+      # yt-dlp_macos unpacks itself on every call (5-6 s each vs 0.5 s). Linux installs both each run.
+      - name: yt-dlp and ffmpeg (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          dir="$RUNNER_TOOL_CACHE/yt-dlp/zipapp-$(date +%Y-%m-%d)"
+          if [ ! -x "$dir/yt-dlp" ]; then
+            rm -rf "$RUNNER_TOOL_CACHE/yt-dlp" && mkdir -p "$dir"
+            curl -fsSL -o "$dir/yt-dlp" https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp
+            chmod +x "$dir/yt-dlp"
+          fi
+          echo "$dir" >> "$GITHUB_PATH"
+          echo /opt/homebrew/bin >> "$GITHUB_PATH"
+      - name: yt-dlp and ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
           if [ "$(id -u)" = 0 ]; then S=; else S=sudo; fi
           $S apt-get update -qq
           $S apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null
