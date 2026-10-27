@@ -189,12 +189,22 @@ function isPublic(host: string) {
 }
 
 let proxy: Promise<string> | undefined
+// ponytail: in-process daily self-update; pin a version if nightly ever breaks
+// The update swaps the binary out, so a run started meanwhile waits for it
+// (else spawn fails with "Executable not found")
+let updating: Promise<unknown> = Promise.resolve()
+const update = () =>
+  (updating = Bun.spawn(['yt-dlp', '--update-to', 'nightly'], {
+    stdout: 'inherit',
+  }).exited)
+
 async function ytdlp(args: string[]) {
   // a failed listen isn't kept: the next download tries again
   proxy ??= egressProxy().catch((e) => {
     proxy = undefined
     throw e
   })
+  await updating
   const p = Bun.spawn(['yt-dlp', '--proxy', await proxy, ...args], {
     env: proxyFreeEnv(),
     stdout: 'pipe',
@@ -577,10 +587,6 @@ function main() {
   })
   bot.catch((e) => console.error(e.error))
 
-  // ponytail: in-process daily self-update; pin a version if nightly ever breaks
-  const update = () =>
-    Bun.spawn(['yt-dlp', '--update-to', 'nightly'], { stdout: 'inherit' })
-      .exited
   setInterval(update, 24 * 3600_000)
 
   // Keeps the YouTube session in use so it doesn't go stale; Watch Later only
