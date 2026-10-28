@@ -308,6 +308,35 @@ async function saveJar(dir: string) {
   await rename(`${JAR}.new`, JAR)
 }
 
+// First-seen chat and user ids, for stats.borodutch.com (served on STATS_PORT
+// inside the Docker network only, no domain): totals and new ones per UTC day
+export function census(db: Database) {
+  const tables = ['chats', 'users'] as const
+  for (const t of tables)
+    db.run(`CREATE TABLE IF NOT EXISTS ${t} (id INTEGER PRIMARY KEY, created INTEGER NOT NULL)`)
+  const [chat, user] = tables.map((t) =>
+    db.query(`INSERT OR IGNORE INTO ${t} VALUES (?, unixepoch())`),
+  )
+  const daily = (t: string) =>
+    db
+      .query(`SELECT date(created, 'unixepoch') AS date, count(*) AS count FROM ${t} GROUP BY 1 ORDER BY 1`)
+      .all() as { date: string; count: number }[]
+  const total = (t: string) =>
+    (db.query(`SELECT count(*) AS n FROM ${t}`).get() as { n: number }).n
+  return {
+    seen(chatId?: number, userId?: number) {
+      if (chatId !== undefined) chat!.run(chatId)
+      if (userId !== undefined) user!.run(userId)
+    },
+    stats: () => ({
+      chatCount: total('chats'),
+      userCount: total('users'),
+      chatDaily: daily('chats'),
+      userDaily: daily('users'),
+    }),
+  }
+}
+
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
@@ -323,6 +352,14 @@ function main() {
       .run(key, f.kind, f.file_id, f.title, f.url)
   const forget = (f: File) =>
     db.query('DELETE FROM files WHERE file_id = ?').run(f.file_id)
+  const people = census(db)
+  Bun.serve({
+    port: Number(env.STATS_PORT || 8080),
+    fetch: (req) =>
+      new URL(req.url).pathname === '/stats'
+        ? Response.json(people.stats())
+        : new Response('Not found', { status: 404 }),
+  })
 
   const bot = new Bot(env.TOKEN!, {
     client: { apiRoot: API, timeoutSeconds: 3600 },
@@ -596,6 +633,14 @@ function main() {
     }
   }
 
+  bot.use((ctx, next) => {
+    try {
+      people.seen(ctx.chat?.id, ctx.from?.id)
+    } catch (e) {
+      console.error(e) // a stats write never blocks a download
+    }
+    return next()
+  })
   bot.command(['start', 'help'], (ctx) =>
     ctx.reply(t(ctx.from?.language_code, 'help')),
   )

@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test'
 import type { Message } from 'grammy/types'
+import { Database } from 'bun:sqlite'
 import {
+  census,
   answer,
   claims,
   Fail,
@@ -265,3 +267,16 @@ test.skipIf(!Bun.which('yt-dlp') && !process.env.CI)(
   },
   30_000,
 )
+
+test('census: chats and users counted once, by first-seen day', () => {
+  const c = census(new Database(':memory:'))
+  c.seen(-100, 1)
+  c.seen(-100, 2)
+  c.seen(1, 1)
+  c.seen(undefined, 3)
+  const s = c.stats()
+  const today = new Date().toISOString().slice(0, 10)
+  expect([s.chatCount, s.userCount]).toEqual([2, 3])
+  expect(s.chatDaily).toEqual([{ date: today, count: 2 }])
+  expect(s.userDaily).toEqual([{ date: today, count: 3 }])
+})
