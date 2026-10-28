@@ -116,10 +116,21 @@ export function picked(info: any) {
   return info.entries?.[0] ?? info
 }
 
+// A tweet with only text or pictures: shared everywhere, never worth an answer
+const TWEET_NO_VIDEO = /\[twitter\].*no video could be found/i
+
 // What to tell the chat about a failed link, null = nothing. "Not a video"
 // only gets an answer from whoever asked the bot itself.
-export const answer = (key: Key | null, chat: string, called: boolean) =>
-  key ?? (chat === 'private' || called ? 'failed' : null)
+export const answer = (key: Key | null, chat: string, called: boolean, why = '') =>
+  TWEET_NO_VIDEO.test(why) ? null : key ?? (chat === 'private' || called ? 'failed' : null)
+
+// t.me/s/<channel>/<post> is the channel's web preview, which yt-dlp reads
+// as a list of the latest posts: the post itself is t.me/<channel>/<post>
+const tme = (url: URL) => {
+  if (/^(t|telegram)\.me$/i.test(url.hostname))
+    url.pathname = url.pathname.replace(/^\/s\/([^/]+\/\d+)/, '/$1')
+  return url
+}
 
 export function urls(msg: Message) {
   const text = msg.text ?? msg.caption ?? ''
@@ -134,7 +145,7 @@ export function urls(msg: Message) {
     ...new Set(
       found.flatMap((u) => {
         try {
-          const url = new URL(/^\w+:\/\//.test(u) ? u : `https://${u}`)
+          const url = tme(new URL(/^\w+:\/\//.test(u) ? u : `https://${u}`))
           return /^https?:$/.test(url.protocol) && isPublic(url.hostname)
             ? [url.href]
             : []
@@ -540,6 +551,7 @@ function main() {
         e instanceof Fail ? e.key : 'failed',
         ctx.chat!.type,
         summoned(ctx.msg!, ctx.me.username),
+        (e as Error).message,
       )
       if (key) await status(key).catch(() => {})
     }

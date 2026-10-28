@@ -211,6 +211,22 @@ test('answer: groups only hear about real failures unless they asked', () => {
   // and so is a stream that can't be downloaded yet
   expect(answer(unready({ is_live: true }), 'group', false)).toBe('live')
   expect(answer(unstarted('ERROR: [youtube] a: Premieres in 3 hours'), 'group', false)).toBe('upcoming')
+  // a tweet without a video gets no answer, not even when asked
+  const tweet = 'ERROR: [twitter] 2115252259521233154: No video could be found in this tweet'
+  expect(answer(notVideo(tweet) ? null : 'failed', 'private', true, tweet)).toBeNull()
+})
+
+test('urls: a t.me/s/ channel preview link becomes the post itself', () => {
+  const list = ['https://t.me/s/telegram/459', 't.me/s/telegram', 'https://telegram.me/s/durov/1?single']
+  const msg = {
+    text: list.join(' '),
+    entities: list.map((u) => ({ type: 'text_link', offset: 0, length: 1, url: u })),
+  } as Message
+  expect(urls(msg)).toEqual([
+    'https://t.me/telegram/459',
+    'https://t.me/s/telegram',
+    'https://telegram.me/durov/1?single',
+  ])
 })
 
 test('i18n: every language has every key', () => {
