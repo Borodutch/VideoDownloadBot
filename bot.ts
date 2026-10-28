@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { egressProxy, proxyFreeEnv } from './egress'
 import { pollWithHandover } from './handover'
 import { type Key, t } from './i18n'
+import { type Promo, promos } from './promo'
 
 const env = process.env
 const API = env.BOT_API_URL || 'https://api.telegram.org'
@@ -46,9 +47,10 @@ type Kind = 'video' | 'animation' | 'audio' | 'document'
 type File = { kind: Kind; file_id: string; title: string; url: string }
 type Opts = Parameters<Context['api']['sendVideo']>[2] &
   Parameters<Context['api']['sendAudio']>[2]
-// Where a file goes: a chat, replying to a message there; sent = the id of
-// the message that carried it
-type Dest = { chat: number | string; reply?: number; sent?: number }
+// Where a file goes: a chat, replying to a message there, with a promo line
+// or button if the user's experiment arm has one (promo.ts); sent = the id
+// of the message that carried it
+type Dest = { chat: number | string; reply?: number; sent?: number; promo?: Promo }
 // Guest replies can't upload, so their files go through this chat first
 // (the message is deleted right after, the file_id stays valid)
 const STORAGE = env.STORAGE_CHAT || env.ADMIN_ID
@@ -361,6 +363,7 @@ function main() {
         : new Response('Not found', { status: 404 }),
   })
 
+  const promo = promos(db)
   const bot = new Bot(env.TOKEN!, {
     client: { apiRoot: API, timeoutSeconds: 3600 },
   })
@@ -409,7 +412,15 @@ function main() {
   }
 
   const options = (dest: Dest, f: Pick<File, 'title' | 'url'>): Opts => ({
-    caption: `<a href="${esc(f.url)}">${esc([...f.title].slice(0, 200).join(''))}</a>\n@${bot.botInfo.username}`,
+    caption:
+      `<a href="${esc(f.url)}">${esc([...f.title].slice(0, 200).join(''))}</a>\n@${bot.botInfo.username}` +
+      (dest.promo?.format === 'caption'
+        ? `\n\n<a href="${esc(dest.promo.url)}">${esc(dest.promo.text)}</a>`
+        : ''),
+    reply_markup:
+      dest.promo?.format === 'button'
+        ? { inline_keyboard: [[{ text: dest.promo.text, url: dest.promo.url }]] }
+        : undefined,
     parse_mode: 'HTML',
     supports_streaming: true,
     disable_notification: !dest.reply,
@@ -574,12 +585,16 @@ function main() {
           })
         ).message_id
     }
+    const d = ctx.from
+      ? promo.decide(ctx.from.id, ctx.chat!.type, lang)
+      : null
     try {
       await deliver(
-        { chat: ctx.chat!.id, reply: ctx.msg!.message_id },
+        { chat: ctx.chat!.id, reply: ctx.msg!.message_id, promo: d?.promo },
         url,
         status,
       )
+      promo.record(d)
       if (statusId)
         await ctx.api.deleteMessage(ctx.chat!.id, statusId).catch(() => {})
     } catch (e) {
@@ -669,6 +684,9 @@ function main() {
   bot.catch((e) => console.error(e.error))
 
   setInterval(update, 24 * 3600_000)
+  void promo.refresh()
+  setInterval(promo.refresh, 5 * 60_000)
+  setInterval(promo.flush, 60_000)
 
   // Keeps the YouTube session in use so it doesn't go stale; Watch Later only
   // opens when logged in. If Google kills the session anyway, tell ADMIN_ID.
@@ -706,6 +724,7 @@ function main() {
       () => bot.stop(),
       async () => {
         while (running) await Bun.sleep(100)
+        await promo.flush()
       },
     ),
   )
