@@ -4,12 +4,13 @@ import { arm, bucket, type Config, decide, promos } from './promo'
 
 const cfg = (over: Partial<Config['campaigns'][0]> = {}, enabled = true): Config => ({
   base: 'https://lumen.borodutch.com/go',
-  bots: { videodownloadbot: { enabled } },
+  bots: { videodownloadbot: { enabled, code: 'vdb' } },
   campaigns: [
     {
-      id: 'vdb-voicy-1',
+      id: 'xp1',
       bot: 'videodownloadbot',
       status: 'running',
+      target: 'https://t.me/voicybot',
       chats: ['private'],
       cap_days: 7,
       langs: ['en', 'ru', 'pt'],
@@ -23,7 +24,7 @@ const cfg = (over: Partial<Config['campaigns'][0]> = {}, enabled = true): Config
   ],
 })
 const never = () => undefined
-// users in each arm of vdb-voicy-1
+// users in each arm of xp1
 const users = Array.from({ length: 20_000 }, (_, i) => 1000 + i)
 const inArm = (id: string | undefined) => users.find((u) => arm(cfg().campaigns[0]!, u)?.id === id)!
 
@@ -44,11 +45,24 @@ test('decide: arms, texts, links, caps', () => {
   expect(a.unit).toMatch(/^[0-9a-f]{16}$/)
   expect(a.promo).toEqual({
     text: 'Voice to text',
-    url: `https://lumen.borodutch.com/go/vdb-voicy-1/a?u=${a.unit}`,
+    // a native deep link, not a redirect: Telegram opens the bot in the app
+    url: 'https://t.me/voicybot?start=xp1-a-vdb',
     format: 'caption',
   })
   // pt-br reads the pt text; a button variant has its own wording
-  expect(decide(cfg(), 's', inArm('b'), 'private', 'pt-br', never)!.promo).toMatchObject({ text: 'Bt', format: 'button' })
+  expect(decide(cfg(), 's', inArm('b'), 'private', 'pt-br', never)!.promo).toMatchObject({
+    text: 'Bt',
+    format: 'button',
+    url: 'https://t.me/voicybot?start=xp1-b-vdb',
+  })
+  // a channel invite link per variant goes as it is; a web page through /go
+  const variants = [
+    { id: 'a', share: 0.1, format: 'caption' as const, target: 'https://t.me/+AAA' },
+    { id: 'b', share: 0.1, format: 'button' as const, target: 'https://t.me/+BBB' },
+  ]
+  expect(decide(cfg({ variants }), 's', inArm('b'), 'private', 'en', never)!.promo!.url).toBe('https://t.me/+BBB')
+  const web = decide(cfg({ target: 'https://todorant.com' }), 's', inArm('a'), 'private', 'en', never)!
+  expect(web.promo!.url).toBe(`https://lumen.borodutch.com/go/xp1/a?u=${web.unit}`)
   const h = decide(cfg(), 's', inArm(undefined), 'private', 'ru', never)!
   expect(h).toMatchObject({ arm: 'holdout' })
   expect(h.promo).toBeUndefined()
@@ -67,6 +81,8 @@ test('decide: out of every experiment when switched off or not covered', () => {
   expect(decide(cfg({}, false), 's', u, 'private', 'en', never)).toBeNull()
   expect(decide(cfg({ status: 'paused' }), 's', u, 'private', 'en', never)).toBeNull()
   expect(decide(cfg({ bot: 'voicy' }), 's', u, 'private', 'en', never)).toBeNull()
+  // an id that can't be a deep-link payload (the first campaign's) is skipped
+  expect(decide(cfg({ id: 'vdb-voicy-1' }), 's', u, 'private', 'en', never)).toBeNull()
   expect(decide(cfg(), 's', u, 'group', 'en', never)).toBeNull()
   expect(decide(cfg(), 's', u, 'private', 'ja', never)).toBeNull()
   // no holdout left: refused

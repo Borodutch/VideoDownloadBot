@@ -2,7 +2,8 @@ import type { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
 import { lang } from './i18n'
 
-// Cross-promotion of the maker's other bots, run as measured A/B experiments.
+// Cross-promotion of the maker's other bots and channel, run as measured A/B
+// experiments.
 // Campaigns live in one file Prime Radiant edits (go/campaigns.json in
 // backmeupplz/prime-radiant), served at PROMO_URL; this bot re-reads it every
 // 5 minutes. Each user lands in a fixed arm per campaign (a hash of campaign
@@ -24,11 +25,14 @@ export type Variant = {
   format: 'caption' | 'button'
   // its own wording (a button needs a short one), else the campaign's
   text?: Record<string, string>
+  // its own target (each variant's channel invite link), else the campaign's
+  target?: string
 }
 export type Campaign = {
   id: string
   bot: string
   status: string
+  target: string
   chats: string[]
   cap_days: number
   langs: string[]
@@ -37,7 +41,7 @@ export type Campaign = {
 }
 export type Config = {
   base: string
-  bots: Record<string, { enabled: boolean }>
+  bots: Record<string, { enabled: boolean; code: string }>
   campaigns: Campaign[]
 }
 export type Promo = { text: string; url: string; format: Variant['format'] }
@@ -58,12 +62,35 @@ export function arm(c: Campaign, user: number) {
   return undefined
 }
 
-// A campaign this bot may run, or not: its shares must leave a holdout
-const usable = (c: Campaign) =>
+// A bot's own t.me link (bot usernames end in "bot")
+const BOT_LINK = /^https:\/\/t\.me\/[A-Za-z0-9_]{2,29}bot$/i
+const PAYLOAD = /^[A-Za-z0-9_-]{1,64}$/
+
+// The link a promo carries. Another bot gets a native deep link, so Telegram
+// opens it in the app, with t.me/<bot>?start=<campaign>-<variant>-<this bot's
+// code> (the promoted bot reports the /start). A channel or invite link goes
+// as it is (joins are counted per invite link). Only web pages go through the
+// /go redirect, which counts the tap and adds UTM tags. undefined = this
+// campaign can't make a valid link.
+export function link(cfg: Config, c: Campaign, v: Variant, unit: string) {
+  const target = v.target ?? c.target
+  if (BOT_LINK.test(target)) {
+    const payload = `${c.id}-${v.id}-${cfg.bots[BOT]?.code}`
+    return PAYLOAD.test(payload) && /^[a-z0-9]{1,16}$/.test(c.id)
+      ? `${target}?start=${payload}`
+      : undefined
+  }
+  if (/^https:\/\/t\.me\//.test(target)) return target
+  return `${cfg.base}/${c.id}/${v.id}?u=${unit}`
+}
+
+// A campaign this bot may run, or not: its shares must leave a holdout, and
+// every variant needs a valid link
+const usable = (cfg: Config, c: Campaign) =>
   c.bot === BOT &&
   c.status === 'running' &&
   c.variants.reduce((s, v) => s + v.share, 0) < 1 &&
-  c.variants.every((v) => v.share > 0)
+  c.variants.every((v) => v.share > 0 && link(cfg, c, v, '0') !== undefined)
 
 // What to do for one reply: null = not in any experiment (log nothing)
 export function decide(
@@ -78,7 +105,7 @@ export function decide(
   if (!cfg || !salt || cfg.bots?.[BOT]?.enabled !== true) return null
   const l = lang(code).split('-')[0]
   const c = cfg.campaigns.find(
-    (c) => usable(c) && c.chats.includes(chat) && c.langs.includes(l) && c.text[l],
+    (c) => usable(cfg, c) && c.chats.includes(chat) && c.langs.includes(l) && c.text[l],
   )
   if (!c) return null
   const unit = sha(`${salt}:${c.id}:${user}`).slice(0, 16)
@@ -92,7 +119,7 @@ export function decide(
     unit,
     promo: capped
       ? undefined
-      : { text: v.text?.[l] ?? c.text[l]!, url: `${cfg.base}/${c.id}/${v.id}?u=${unit}`, format: v.format },
+      : { text: v.text?.[l] ?? c.text[l]!, url: link(cfg, c, v, unit)!, format: v.format },
   }
 }
 
