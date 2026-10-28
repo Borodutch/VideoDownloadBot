@@ -1,5 +1,7 @@
 # [@VideoDownloadBot](https://t.me/VideoDownloadBot)
 
+Website: **[videodl.borodutch.com](https://videodl.borodutch.com)** (supported sites, how to use it in chats and groups, FAQ).
+
 Send it a link (or post one in a group it's in) and it replies with the video. Downloads go through [yt-dlp](https://github.com/yt-dlp/yt-dlp); every sent file's Telegram `file_id` is kept in SQLite, so the same link (or the same video under another link) is resent instantly. Originally developed by [MaxiFilippov](https://github.com/MaxiFilippov).
 
 ## Run
