@@ -46,7 +46,7 @@ export type Config = {
 }
 export type Promo = { text: string; url: string; format: Variant['format'] }
 export type Decision = { campaign: string; arm: string; unit: string; promo?: Promo }
-type Event = { c: string; v: string; k: 'seen' | 'shown' | 'start' | 'new' | 'use'; u: string; t: number }
+type Event = { c: string; v: string; k: 'seen' | 'shown' | 'start' | 'new' | 'use' | 'blocked'; u: string; t: number }
 
 // /start payload from another bot's campaign link: <campaign>-<variant>-<source bot code>
 // (xp1-a-vdb from this bot to Voicy, bc1-a-voicy from Voicy's broadcast to this one)
@@ -209,6 +209,16 @@ export function promos(db: Database, env = process.env) {
       }
       if (d.promo) queue.push({ ...base, k: 'shown' })
       if (queue.length >= 500) void flush()
+    },
+    // A private chat blocked the bot (my_chat_member → kicked): one blocked
+    // event per campaign this bot runs, in the user's arm (holdout too), so
+    // harm is treatment against holdout
+    blocked(user: number) {
+      const fresh = Date.now() - fetched < STALE ? cfg : undefined
+      if (!fresh || !salt) return
+      const t = Math.floor(Date.now() / 1000)
+      for (const c of fresh.campaigns.filter((c) => c.bot === BOT && c.status !== 'stopped'))
+        queue.push({ c: c.id, v: arm(c, user)?.id ?? 'holdout', k: 'blocked', u: sha(`${salt}:${c.id}:${user}`).slice(0, 16), t })
     },
     // Another bot's campaign brought this user (/start <payload>): start each
     // time (the numbers count distinct people), new when the chat is new here.

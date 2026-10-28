@@ -716,6 +716,7 @@ function main() {
   bot.on('my_chat_member', (ctx) => {
     const was = ctx.myChatMember.old_chat_member.status
     const now = ctx.myChatMember.new_chat_member.status
+    if (ctx.chat.type === 'private' && now === 'kicked') promo.blocked(ctx.from.id)
     if (
       ctx.chat.type !== 'private' &&
       (was === 'left' || was === 'kicked') &&

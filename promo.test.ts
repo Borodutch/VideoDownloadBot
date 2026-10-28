@@ -122,6 +122,13 @@ test('promos: one promo per cap even for several links, seen once a day, events 
     await p.flush()
     // the token goes next to PROMO_URL, not to the config's base
     expect(got.map((e) => `${e.v}:${e.k}`)).toEqual(['a:seen', 'a:shown', 'holdout:seen'])
+    // blocks: one event in the user's arm per campaign that isn't stopped
+    got.length = 0
+    p.blocked(inArm('b'))
+    p.blocked(inArm(undefined))
+    await p.flush()
+    expect(got.map((e) => `${e.c}:${e.v}:${e.k}`)).toEqual(['xp1:b:blocked', 'xp1:holdout:blocked'])
+    expect(got[0].u).toBe(createHash('sha256').update(`tok:xp1:${inArm('b')}`).digest('hex').slice(0, 16))
     expect(promos(new Database(':memory:'), { PROMO: 'off', PROMO_TOKEN: 'tok' }).decide(inArm('a'), 'private', 'en')).toBeNull()
   } finally {
     server.stop(true)
