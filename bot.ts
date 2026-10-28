@@ -630,6 +630,7 @@ function main() {
         status,
       )
       promo.record(d)
+      if (ctx.from && ctx.chat!.type === 'private') promo.used(ctx.from.id)
       if (statusId)
         await ctx.api.deleteMessage(ctx.chat!.id, statusId).catch(() => {})
     } catch (e) {
@@ -693,9 +694,13 @@ function main() {
     }
     return next()
   })
-  bot.command(['start', 'help'], (ctx) =>
-    ctx.reply(t(ctx.from?.language_code, 'help')),
-  )
+  const created = db.query<{ created: number }, [number]>('SELECT created FROM chats WHERE id = ?')
+  bot.command(['start', 'help'], (ctx) => {
+    // a /start from another bot's campaign link (promo.ts); the census above has just added a new chat
+    if (ctx.chat.type === 'private' && ctx.from && ctx.match)
+      promo.arrived(ctx.from.id, ctx.match, Date.now() / 1000 - (created.get(ctx.chat.id)?.created ?? 0) < 600)
+    return ctx.reply(t(ctx.from?.language_code, 'help'))
+  })
   bot.on('message', (ctx) => {
     const found = links(ctx.msg, ctx.me.username)
     // handlers run detached so one long download doesn't block the next update

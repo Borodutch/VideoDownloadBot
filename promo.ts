@@ -46,7 +46,12 @@ export type Config = {
 }
 export type Promo = { text: string; url: string; format: Variant['format'] }
 export type Decision = { campaign: string; arm: string; unit: string; promo?: Promo }
-type Event = { c: string; v: string; k: 'seen' | 'shown'; u: string; t: number }
+type Event = { c: string; v: string; k: 'seen' | 'shown' | 'start' | 'new' | 'use'; u: string; t: number }
+
+// /start payload from another bot's campaign link: <campaign>-<variant>-<source bot code>
+// (xp1-a-vdb from this bot to Voicy, bc1-a-voicy from Voicy's broadcast to this one)
+export const ARRIVAL = /^([a-z0-9]{1,16})-([a-z0-9]{1,8})-([a-z0-9]{1,12})$/
+const WEEK = 7 * 86400_000
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex')
 
@@ -130,6 +135,11 @@ export function promos(db: Database, env = process.env) {
   const row = db.query<{ seen: string | null; shown: number | null }, [string, string]>(
     'SELECT seen, shown FROM promo WHERE campaign = ? AND unit = ?',
   )
+  // the campaign that first brought each user here, for the 7-day use count
+  db.run('CREATE TABLE IF NOT EXISTS arrival (user INTEGER PRIMARY KEY, payload TEXT NOT NULL, at INTEGER NOT NULL, used TEXT)')
+  const arrival = db.query<{ payload: string; at: number; used: string | null }, [number]>(
+    'SELECT payload, at, used FROM arrival WHERE user = ?',
+  )
   const upsert = (col: 'seen' | 'shown', campaign: string, unit: string, value: string | number) =>
     db
       .query(`INSERT INTO promo (campaign, unit, ${col}) VALUES (?, ?, ?) ON CONFLICT (campaign, unit) DO UPDATE SET ${col} = excluded.${col}`)
@@ -199,6 +209,26 @@ export function promos(db: Database, env = process.env) {
       }
       if (d.promo) queue.push({ ...base, k: 'shown' })
       if (queue.length >= 500) void flush()
+    },
+    // Another bot's campaign brought this user (/start <payload>): start each
+    // time (the numbers count distinct people), new when the chat is new here.
+    // Same salted hash as the other bots, so the experiment can join them.
+    arrived(user: number, payload: string | undefined, fresh: boolean) {
+      const m = ARRIVAL.exec(payload || '')
+      if (!m || !salt) return
+      const base = { c: m[1]!, v: m[2]!, u: sha(`${salt}:${m[1]}:${user}`).slice(0, 16), t: Math.floor(Date.now() / 1000) }
+      queue.push({ ...base, k: 'start' })
+      if (fresh) queue.push({ ...base, k: 'new' })
+      db.query('INSERT OR IGNORE INTO arrival VALUES (?, ?, ?, NULL)').run(user, payload!, Date.now())
+    },
+    // A download in the 7 days after the arrival: use, once a day
+    used(user: number) {
+      const a = arrival.get(user)
+      const day = new Date().toISOString().slice(0, 10)
+      if (!a || !salt || Date.now() - a.at > WEEK || a.used === day) return
+      db.query('UPDATE arrival SET used = ? WHERE user = ?').run(day, user)
+      const [, c, v] = ARRIVAL.exec(a.payload)!
+      queue.push({ c: c!, v: v!, k: 'use', u: sha(`${salt}:${c}:${user}`).slice(0, 16), t: Math.floor(Date.now() / 1000) })
     },
   }
 }

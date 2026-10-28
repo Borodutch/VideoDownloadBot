@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite'
+import { createHash } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import { arm, bucket, type Config, decide, promos } from './promo'
 
@@ -122,6 +123,37 @@ test('promos: one promo per cap even for several links, seen once a day, events 
     // the token goes next to PROMO_URL, not to the config's base
     expect(got.map((e) => `${e.v}:${e.k}`)).toEqual(['a:seen', 'a:shown', 'holdout:seen'])
     expect(promos(new Database(':memory:'), { PROMO: 'off', PROMO_TOKEN: 'tok' }).decide(inArm('a'), 'private', 'en')).toBeNull()
+  } finally {
+    server.stop(true)
+  }
+})
+
+test('arrivals: /start from another bot\'s campaign reports start, new and use once a day for 7 days', async () => {
+  const got: any[] = []
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (new URL(req.url).pathname === '/go/events') got.push(...(await req.json()).events)
+      return Response.json({})
+    },
+  })
+  try {
+    const db = new Database(':memory:')
+    const p = promos(db, { PROMO_TOKEN: 'tok', PROMO_URL: `http://localhost:${server.port}/go/campaigns.json` })
+    p.arrived(42, 'bc1-a-voicy', true)
+    p.arrived(42, 'bc1-a-voicy', false) // an existing chat sends it again: start only
+    p.arrived(42, 'hello', true) // not a campaign
+    p.used(42)
+    p.used(42) // once a day
+    p.used(7) // never arrived
+    await p.flush()
+    const unit = createHash('sha256').update('tok:bc1:42').digest('hex').slice(0, 16)
+    expect(got.map((e) => `${e.c}:${e.v}:${e.k}`)).toEqual(['bc1:a:start', 'bc1:a:new', 'bc1:a:start', 'bc1:a:use'])
+    expect(got.every((e) => e.u === unit)).toBe(true)
+    db.run('UPDATE arrival SET at = 0, used = NULL')
+    p.used(42) // more than 7 days later
+    await p.flush()
+    expect(got.length).toBe(4)
   } finally {
     server.stop(true)
   }
