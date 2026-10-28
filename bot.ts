@@ -80,6 +80,27 @@ export function notVideo(why: string, ies: string[] = []) {
   return by.length > 0 && by.every((ie) => NEWS.test(ie))
 }
 
+// A stream that hasn't started makes yt-dlp -J fail: YouTube's own reasons
+// ("This live event will begin in 5 hours.", "Premieres in 3 hours") and
+// other sites' extractor messages ("This livestream has not yet started").
+// An offline channel ("The channel is not currently live") stays a failure:
+// nothing says a stream is coming.
+const UPCOMING = /live event will begin|: premieres?\b|(stream|event|broadcast|space)\b.* not (yet )?started|not started yet|event will start at|scheduled for/i
+
+// 'upcoming' for a yt-dlp error saying the stream hasn't started, else null
+export const unstarted = (why: string): Key | null =>
+  UPCOMING.test(why) ? 'upcoming' : null
+
+// What to say about a stream yt-dlp can't download yet, or null: live now,
+// or announced and not started. A stream that just ended (post_live) is
+// tried like a video.
+export const unready = (v: any): Key | null =>
+  v.is_live || v.live_status === 'is_live'
+    ? 'live'
+    : v.live_status === 'is_upcoming'
+      ? 'upcoming'
+      : null
+
 // The video in what yt-dlp -J printed, or Fail(null) when there is none
 export function picked(info: any) {
   // yt-dlp prints null when the page had nothing (a t.me text post)
@@ -389,6 +410,8 @@ function main() {
         json = (await ytdlp([...args, '-J', url])).out
       } catch (e) {
         const why = String((e as Error).message)
+        const soon = unstarted(why)
+        if (soon) throw new Fail(soon, why)
         // an untagged error needs the extractors that claim the link
         const ies = /^(ERROR: )?\[/.test(why)
           ? []
@@ -396,7 +419,8 @@ function main() {
         throw new Fail(notVideo(why, ies) ? null : 'failed', why)
       }
       const v = picked(JSON.parse(json))
-      if (v.is_live) throw new Fail('failed', 'live stream')
+      const stream = unready(v)
+      if (stream) throw new Fail(stream, `${stream} stream`)
       const id = `${v.extractor_key}:${v.id}`
       const hit = get.get(id)
       if (hit && (await resend(dest, hit))) {

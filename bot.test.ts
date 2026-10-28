@@ -8,10 +8,12 @@ import {
   notVideo,
   picked,
   requested,
+  unready,
+  unstarted,
   urls,
   videos,
 } from './bot'
-import { lang } from './i18n'
+import { lang, t } from './i18n'
 
 test('urls: entities, text links, bare domains, dedupe, non-http dropped', () => {
   const text = 'look youtu.be/x and https://x.com/a/status/1 youtu.be/x ftp://a.b'
@@ -162,6 +164,38 @@ test('picked: nothing, empty and YouTube playlists are not a video', () => {
   expect(picked({ id: 'v', extractor_key: 'Youtube' })).toEqual({ id: 'v', extractor_key: 'Youtube' })
 })
 
+test('unstarted: streams that have not begun vs other failures', () => {
+  for (const why of [
+    'ERROR: [youtube] dQw4w9WgXcQ: This live event will begin in 5 hours.',
+    'ERROR: [youtube] dQw4w9WgXcQ: This live event will begin in a few moments.',
+    'ERROR: [youtube] dQw4w9WgXcQ: Premieres in 3 hours',
+    'ERROR: [youtube] dQw4w9WgXcQ: Premiere will begin shortly',
+    'ERROR: [youtube] dQw4w9WgXcQ: Premieres 11/3/26, 7:00 PM',
+    'ERROR: [rokfin] a: Stream is offline; scheduled for 2026-11-03T19:00:00',
+    'ERROR: [youtube] dQw4w9WgXcQ: This live event will begin on November 3, 2026',
+    'ERROR: [Rumble] a: This livestream has not yet started',
+    'ERROR: [VK] a: Livestream has not yet started',
+    'ERROR: [NRKTV] a: Live event has not yet started',
+    'ERROR: [twitter:broadcast] a: This live broadcast has not yet started',
+    'ERROR: [twitter:spaces] a: Twitter Space not started yet',
+    'ERROR: [Bilibili] a: This event will start at 1700000000',
+    'ERROR: [NFHSNetwork] a: This live event is scheduled for 2026-11-03',
+  ])
+    expect(unstarted(why)).toBe('upcoming')
+  for (const [why] of [...empty, ...broken]) expect(unstarted(why)).toBeNull()
+  expect(unstarted('ERROR: [twitch:stream] foo: The channel is not currently live')).toBeNull()
+})
+
+test('unready: live and upcoming streams, not ended ones or videos', () => {
+  expect(unready({ is_live: true })).toBe('live')
+  expect(unready({ is_live: false, live_status: 'is_live' })).toBe('live')
+  expect(unready({ is_live: false, live_status: 'is_upcoming' })).toBe('upcoming')
+  expect(unready({ is_live: false, live_status: 'post_live' })).toBeNull()
+  expect(unready({ is_live: false, live_status: 'was_live' })).toBeNull()
+  expect(unready({ live_status: 'not_live' })).toBeNull()
+  expect(unready({ id: 'v' })).toBeNull()
+})
+
 test('answer: groups only hear about real failures unless they asked', () => {
   // what job() throws for a no-video page in a group stays unanswered...
   for (const [why, ies] of empty)
@@ -174,6 +208,18 @@ test('answer: groups only hear about real failures unless they asked', () => {
   for (const [why, ies] of broken)
     expect(answer(notVideo(why, ies) ? null : 'failed', 'group', false)).toBe('failed')
   expect(answer('tooBig', 'supergroup', false)).toBe('tooBig')
+  // and so is a stream that can't be downloaded yet
+  expect(answer(unready({ is_live: true }), 'group', false)).toBe('live')
+  expect(answer(unstarted('ERROR: [youtube] a: Premieres in 3 hours'), 'group', false)).toBe('upcoming')
+})
+
+test('i18n: every language has every key', () => {
+  for (const code of ['en', 'ru', 'es', 'pt-br', 'pt', 'ja', 'zh', 'ar', 'fa'] as const) {
+    expect(lang(code)).toBe(code)
+    for (const k of ['failed', 'live', 'upcoming'] as const) expect(t(code, k)).toBeTruthy()
+  }
+  expect(t('de', 'live')).toBe(t('en', 'live'))
+  expect(t('ru', 'upcoming')).not.toBe(t('en', 'upcoming'))
 })
 
 // CI installs yt-dlp; elsewhere this only runs where it is
