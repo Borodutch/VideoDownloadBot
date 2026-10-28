@@ -311,13 +311,26 @@ async function saveJar(dir: string) {
 }
 
 // First-seen chat and user ids, for stats.borodutch.com (served on STATS_PORT
-// inside the Docker network only, no domain): totals and new ones per UTC day
+// inside the Docker network only, no domain): totals and new ones per UTC day,
+// plus the audience: chats by type and by days since their last update, and
+// private chats that blocked the bot (counts only, never ids)
+export const WINDOWS = [7, 30, 90, 180] as const
 export function census(db: Database) {
   const tables = ['chats', 'users'] as const
   for (const t of tables)
     db.run(`CREATE TABLE IF NOT EXISTS ${t} (id INTEGER PRIMARY KEY, created INTEGER NOT NULL)`)
-  const [chat, user] = tables.map((t) =>
-    db.query(`INSERT OR IGNORE INTO ${t} VALUES (?, unixepoch())`),
+  for (const col of ['seen INTEGER', 'type TEXT', 'gone INTEGER NOT NULL DEFAULT 0'])
+    try {
+      db.run(`ALTER TABLE chats ADD COLUMN ${col}`)
+    } catch {} // already there
+  const chat = db.query(
+    `INSERT INTO chats (id, created, seen, type) VALUES (?1, unixepoch(), unixepoch(), ?2)
+     ON CONFLICT (id) DO UPDATE SET seen = excluded.seen, type = coalesce(excluded.type, type), gone = 0`,
+  )
+  const user = db.query('INSERT OR IGNORE INTO users VALUES (?, unixepoch())')
+  const member = db.query(
+    `INSERT INTO chats (id, created, type, gone) VALUES (?1, unixepoch(), 'private', ?2)
+     ON CONFLICT (id) DO UPDATE SET gone = excluded.gone`,
   )
   const daily = (t: string) =>
     db
@@ -325,16 +338,38 @@ export function census(db: Database) {
       .all() as { date: string; count: number }[]
   const total = (t: string) =>
     (db.query(`SELECT count(*) AS n FROM ${t}`).get() as { n: number }).n
+  const recent = WINDOWS.map(
+    (d) => `sum(gone = 0 AND unixepoch() - coalesce(seen, created) < ${d * 86400}) AS d${d}`,
+  ).join(', ')
+  const audience = () =>
+    Object.fromEntries(
+      (
+        db
+          .query(
+            `SELECT coalesce(type, CASE WHEN id > 0 THEN 'private' WHEN id < -1000000000000
+               THEN 'supergroup_or_channel' ELSE 'group' END) AS kind,
+             count(*) AS ever, sum(gone) AS unreachable, ${recent}
+             FROM chats GROUP BY 1`,
+          )
+          .all() as ({ kind: string } & Record<string, number>)[]
+      ).map(({ kind, ...n }) => [kind, n]),
+    )
   return {
-    seen(chatId?: number, userId?: number) {
-      if (chatId !== undefined) chat!.run(chatId)
-      if (userId !== undefined) user!.run(userId)
+    // a chat's last activity: any update from it except the bot's own membership changes
+    seen(chatId?: number, userId?: number, type?: string) {
+      if (chatId !== undefined) chat.run(chatId, type ?? null)
+      if (userId !== undefined) user.run(userId)
+    },
+    // a private chat blocked (kicked) or unblocked the bot
+    member(chatId: number, status: string) {
+      member.run(chatId, status === 'kicked' ? 1 : 0)
     },
     stats: () => ({
       chatCount: total('chats'),
       userCount: total('users'),
       chatDaily: daily('chats'),
       userDaily: daily('users'),
+      audience: audience(),
     }),
   }
 }
@@ -650,7 +685,9 @@ function main() {
 
   bot.use((ctx, next) => {
     try {
-      people.seen(ctx.chat?.id, ctx.from?.id)
+      const m = ctx.myChatMember
+      if (m && m.chat.type === 'private') people.member(m.chat.id, m.new_chat_member.status)
+      else if (!m) people.seen(ctx.chat?.id, ctx.from?.id, ctx.chat?.type)
     } catch (e) {
       console.error(e) // a stats write never blocks a download
     }

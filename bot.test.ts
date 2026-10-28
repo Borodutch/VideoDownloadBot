@@ -280,3 +280,22 @@ test('census: chats and users counted once, by first-seen day', () => {
   expect(s.chatDaily).toEqual([{ date: today, count: 2 }])
   expect(s.userDaily).toEqual([{ date: today, count: 3 }])
 })
+
+test('census: audience by chat type and recency, blocked private chats unreachable', () => {
+  const db = new Database(':memory:')
+  // a database from before the audience columns
+  db.run('CREATE TABLE chats (id INTEGER PRIMARY KEY, created INTEGER NOT NULL)')
+  db.run('INSERT INTO chats VALUES (5, unixepoch() - 100 * 86400), (-1001234567890, unixepoch() - 400 * 86400)')
+  const c = census(db)
+  c.seen(1, 1, 'private')
+  c.seen(2, 2, 'private')
+  c.member(2, 'kicked')
+  c.seen(-42, 3, 'group')
+  const a = c.stats().audience
+  expect(a.private).toEqual({ ever: 3, unreachable: 1, d7: 1, d30: 1, d90: 1, d180: 2 })
+  expect(a.group).toEqual({ ever: 1, unreachable: 0, d7: 1, d30: 1, d90: 1, d180: 1 })
+  expect(a.supergroup_or_channel).toEqual({ ever: 1, unreachable: 0, d7: 0, d30: 0, d90: 0, d180: 0 })
+  c.member(2, 'member') // unblocked
+  c.seen(2, 2, 'private')
+  expect(c.stats().audience.private.unreachable).toBe(0)
+})
