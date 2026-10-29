@@ -11,7 +11,10 @@ import {
   links,
   notVideo,
   picked,
+  probe,
   requested,
+  shown,
+  THUMB,
   unready,
   unstarted,
   urls,
@@ -306,4 +309,52 @@ test('only cached file_ids skip the document fallback', () => {
   expect(fresh('BAACAgIAAxkBAAIBY2')).toBe(false)
   expect(fresh('file:///scratch/bot-a/job-1/v.mp4')).toBe(true)
   expect(fresh(new InputFile(new Uint8Array(1)))).toBe(true)
+})
+
+test('shown: sample aspect ratio and rotation', () => {
+  // Instagram's progressive mp4 for the reel in #281
+  expect(shown({ width: 1280, height: 720, sample_aspect_ratio: '1:1' })).toEqual({ width: 1280, height: 720 })
+  // anamorphic: coded 1080x1440, shown 16:9
+  expect(shown({ width: 1080, height: 1440, sample_aspect_ratio: '64:27' })).toEqual({ width: 2560, height: 1440 })
+  // unknown aspect = square pixels
+  expect(shown({ width: 640, height: 480, sample_aspect_ratio: '0:1' })).toEqual({ width: 640, height: 480 })
+  expect(shown({ width: 640, height: 480 })).toEqual({ width: 640, height: 480 })
+  // rotation side data (any sign), or the old rotate tag
+  expect(shown({ width: 1920, height: 1080, side_data_list: [{ rotation: -90 }] })).toEqual({ width: 1080, height: 1920 })
+  expect(shown({ width: 1920, height: 1080, side_data_list: [{ rotation: 180 }] })).toEqual({ width: 1920, height: 1080 })
+  expect(shown({ width: 1920, height: 1080, tags: { rotate: '270' } })).toEqual({ width: 1080, height: 1920 })
+  expect(shown({ width: 1080, height: 1440, sample_aspect_ratio: '64:27', side_data_list: [{ rotation: 90 }] })).toEqual({ width: 1440, height: 2560 })
+  expect(shown(undefined)).toBeUndefined()
+  expect(shown({ width: 0, height: 0 })).toBeUndefined()
+})
+
+// What sendVideo and the thumbnail get from a real anamorphic, rotated file
+test.skipIf(!(Bun.which('ffmpeg') || process.env.CI))('probe and thumbnail: display size of the file', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'probe-'))
+  const run = async (args: string[]) => {
+    const p = Bun.spawn(['ffmpeg', '-v', 'error', '-y', ...args], { stderr: 'pipe' })
+    if (await p.exited) throw new Error(await new Response(p.stderr).text())
+  }
+  try {
+    const flat = join(dir, 'flat.mp4')
+    const rot = join(dir, 'rot.mp4')
+    await run(['-f', 'lavfi', '-i', 'testsrc=s=1080x1440:d=1', '-vf', 'setsar=64/27', '-c:v', 'mpeg4', flat])
+    // -display_rotation came with ffmpeg 6 (Debian bookworm has 5.1)
+    const rotates = Bun.spawnSync(['ffmpeg', '-hide_banner', '-h', 'full']).stdout.toString().includes('display_rotation')
+    if (rotates) await run(['-display_rotation', '90', '-i', flat, '-c', 'copy', rot])
+    expect(await probe(flat)).toEqual({ width: 2560, height: 1440 })
+    if (rotates) expect(await probe(rot)).toEqual({ width: 1440, height: 2560 })
+    expect(await probe(join(dir, 'missing.mp4'))).toBeUndefined()
+    const cases = [[flat, { width: 320, height: 180 }], [rot, { width: 180, height: 320 }]] as const
+    for (const [file, size] of rotates ? cases : cases.slice(0, 1)) {
+      const thumb = join(dir, 'thumb.jpg')
+      await run(['-i', file, '-frames:v', '1', '-vf', THUMB, thumb])
+      expect(await probe(thumb)).toEqual(size)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

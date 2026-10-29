@@ -51,8 +51,9 @@ type Opts = Parameters<Context['api']['sendVideo']>[2] &
   Parameters<Context['api']['sendAudio']>[2]
 // Where a file goes: a chat, replying to a message there, with a promo line
 // or button if the user's experiment arm has one (promo.ts); sent = the id
-// of the message that carried it
-type Dest = { chat: number | string; reply?: number; sent?: number; promo?: Promo }
+// of the message that carried it; stale = a cached video that went out
+// without a size, being downloaded again to replace it
+type Dest = { chat: number | string; reply?: number; sent?: number; promo?: Promo; stale?: number }
 // Guest replies can't upload, so their files go through this chat first
 // (the message is deleted right after, the file_id stays valid)
 const STORAGE = env.STORAGE_CHAT || env.ADMIN_ID
@@ -257,6 +258,50 @@ async function ytdlp(args: string[]) {
   return { out, err }
 }
 
+type Size = { width: number; height: number }
+
+// The size a player shows a video stream at (ffprobe's stream entry): the
+// coded size stretched by the sample aspect ratio, turned by the rotation
+export function shown(s: any): Size | undefined {
+  if (!(s?.width > 0 && s?.height > 0)) return
+  // "0:1" or "N/A" = unknown, square pixels
+  const [n, d] = String(s.sample_aspect_ratio).split(':').map(Number)
+  const width = n > 0 && d > 0 ? Math.round((s.width * n) / d) : s.width
+  const rotation = Number(
+    s.side_data_list?.find((x: any) => x.rotation !== undefined)?.rotation ??
+      s.tags?.rotate ??
+      0,
+  )
+  return Math.abs(rotation) % 180 === 90
+    ? { width: s.height, height: width }
+    : { width, height: s.height }
+}
+
+// Telegram draws the player box from sendVideo's width/height and ignores the
+// file's pixel aspect: they come from the file itself, since yt-dlp often has
+// none (Instagram's progressive mp4s) or another format's
+export async function probe(path: string) {
+  const p = Bun.spawn(
+    [
+      'ffprobe', '-v', 'error', '-select_streams', 'V:0',
+      '-show_entries', 'stream=width,height,sample_aspect_ratio:stream_side_data=rotation:stream_tags=rotate',
+      '-of', 'json', path,
+    ],
+    { stdout: 'pipe', stderr: 'ignore' },
+  )
+  const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited])
+  if (code) return
+  try {
+    return shown(JSON.parse(out).streams?.[0])
+  } catch {
+    return
+  }
+}
+
+// The thumbnail's filter: square pixels first (ffmpeg has already applied
+// the rotation), then within 320x320
+export const THUMB = "scale='iw*sar':ih,scale=320:320:force_original_aspect_ratio=decrease"
+
 // A new file rather than a cached file_id (a local file:// path is new too)
 export const fresh = (f: string | InputFile) =>
   typeof f !== 'string' || f.startsWith('file:')
@@ -396,6 +441,16 @@ function main() {
     db
       .query('INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?)')
       .run(key, f.kind, f.file_id, f.title, f.url)
+  // file_ids uploaded with the file's own size (#281), or whose one refresh
+  // was tried; older videos may have gone out without a size. A table of its
+  // own: a container still running the old code keeps writing files.
+  db.run('CREATE TABLE IF NOT EXISTS sized (file_id TEXT PRIMARY KEY)')
+  // true the first time only
+  const settle = (fileId: string) =>
+    db.query('INSERT OR IGNORE INTO sized VALUES (?)').run(fileId).changes > 0
+  // every link cached with the old file gets the new one
+  const swap = (old: string, f: File) =>
+    db.query('UPDATE files SET kind = ?, file_id = ? WHERE file_id = ?').run(f.kind, f.file_id, old)
   const forget = (f: File) =>
     db.query('DELETE FROM files WHERE file_id = ?').run(f.file_id)
   const people = census(db)
@@ -424,7 +479,7 @@ function main() {
     kind: Kind,
     file: () => string | InputFile,
     opts: Opts,
-  ): Promise<[Kind, string]> {
+  ): Promise<[Kind, string, Message]> {
     const { chat } = dest
     const api = bot.api
     let m: Message
@@ -453,7 +508,7 @@ function main() {
         : m.audio
           ? 'audio'
           : 'document'
-    return [sent, media.file_id]
+    return [sent, media.file_id, m]
   }
 
   const options = (dest: Dest, f: Pick<File, 'title' | 'url'>): Opts => ({
@@ -475,10 +530,14 @@ function main() {
   })
 
   // false = the cached file_id is dead, download again; other errors (flood
-  // wait, blocked bot, no media rights) keep the cache and propagate
-  async function resend(dest: Dest, f: File) {
+  // wait, blocked bot, no media rights) keep the cache and propagate. A video
+  // cached before #281 that Telegram has without a size (it shows squeezed)
+  // goes to unsized with its message, once per file_id.
+  async function resend(dest: Dest, f: File, unsized?: (id: number) => void) {
     try {
-      await send(dest, f.kind, () => f.file_id, options(dest, f))
+      const [, , m] = await send(dest, f.kind, () => f.file_id, options(dest, f))
+      if (unsized && m.video && !(m.video.width && m.video.height) && settle(f.file_id))
+        unsized(m.message_id)
       return true
     } catch (e) {
       if (!(e instanceof GrammyError && e.error_code === 400 && /file/i.test(e.description)))
@@ -528,7 +587,8 @@ function main() {
       if (stream) throw new Fail(stream, `${stream} stream`)
       const id = `${v.extractor_key}:${v.id}`
       const hit = get.get(id)
-      if (hit && (await resend(dest, hit))) {
+      // a refresh wants a new upload, not another cached copy
+      if (hit && !dest.stale && (await resend(dest, hit))) {
         put(url, hit)
         return hit
       }
@@ -560,13 +620,14 @@ function main() {
       await SCRATCH.open(path, true)
       const audio = v.vcodec === 'none'
       const thumb = join(dir, 'thumb.jpg')
+      const box = audio ? undefined : await probe(path)
       if (!audio)
         await Bun.spawn([
           'ffmpeg', '-v', 'error', '-y',
           '-ss', String(Math.min(1, (v.duration ?? 0) / 2)),
           '-i', path,
           '-frames:v', '1',
-          '-vf', 'scale=320:320:force_original_aspect_ratio=decrease',
+          '-vf', THUMB,
           thumb,
         ]).exited
       const f = { title: v.title || 'Video', url: v.webpage_url || url }
@@ -576,8 +637,8 @@ function main() {
         () => SCRATCH.local(path) ?? new InputFile(path),
         {
           ...options(dest, f),
-          width: v.width ?? undefined,
-          height: v.height ?? undefined,
+          width: box?.width ?? v.width ?? undefined,
+          height: box?.height ?? v.height ?? undefined,
           duration: v.duration ? Math.round(v.duration) : undefined,
           thumbnail: existsSync(thumb) ? new InputFile(thumb) : undefined,
           title: audio ? f.title : undefined,
@@ -585,6 +646,7 @@ function main() {
         },
       )
       const file = { ...f, kind, file_id }
+      settle(file_id)
       put(id, file)
       put(url, file)
       return file
@@ -602,7 +664,8 @@ function main() {
     status: (key: Key) => Promise<void>,
   ): Promise<File> {
     const cached = get.get(url)
-    if (cached && (await resend(dest, cached))) return cached
+    if (cached && (await resend(dest, cached, (id) => (dest.stale = id))))
+      return dest.stale ? refresh(dest, url, cached) : cached
     const job = jobs.get(url)
     if (job) {
       const f = await job
@@ -612,6 +675,23 @@ function main() {
     const fresh = download(dest, url, status).finally(() => jobs.delete(url))
     jobs.set(url, fresh)
     return fresh
+  }
+
+  // The unsized video already went out: a fresh download replaces it, and if
+  // that fails the old one stays, cached as before (and not tried again)
+  async function refresh(dest: Dest, url: string, old: File) {
+    console.error('refresh unsized', url)
+    try {
+      const f = await download(dest, url, async () => {})
+      swap(old.file_id, f)
+      await bot.api.deleteMessage(dest.chat, dest.stale!).catch(() => {})
+      return f
+    } catch (e) {
+      console.error('refresh failed', url, (e as Error).message)
+      return old
+    } finally {
+      dest.stale = undefined
+    }
   }
 
   async function handle(ctx: Context, url: string) {
