@@ -2,13 +2,13 @@ import { Database } from 'bun:sqlite'
 import { Bot, type Context, GrammyError, InputFile } from 'grammy'
 import type { InputMediaVideo, Message } from 'grammy/types'
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { chmod, copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { egressProxy, proxyFreeEnv } from './egress'
 import { pollWithHandover } from './handover'
 import { type Key, t } from './i18n'
 import { type Promo, promos } from './promo'
+import { scratch } from './scratch'
 
 const env = process.env
 const API = env.BOT_API_URL || 'https://api.telegram.org'
@@ -16,7 +16,9 @@ const API = env.BOT_API_URL || 'https://api.telegram.org'
 const LIMIT = (API.includes('api.telegram.org') ? 50 : 2000) * 1024 * 1024
 const COOKIES = env.COOKIES || '/cookies.txt'
 const DATA = env.DATA_DIR || './data'
-const TMP = join(tmpdir(), 'videodownloadbot')
+// file:// paths only work with a local Bot API server
+const SCRATCH = scratch(API.includes('api.telegram.org') ? '' : undefined)
+const TMP = SCRATCH.dir
 const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 3)
 // Only formats whose every request goes through the proxy: yt-dlp's own HTTP
 // (HLS, DASH, websockets) and ffmpeg's http(s), which yt-dlp hands the proxy
@@ -229,6 +231,7 @@ let proxy: Promise<string> | undefined
 let updating: Promise<unknown> = Promise.resolve()
 const update = () =>
   (updating = Bun.spawn(['yt-dlp', '--update-to', 'nightly'], {
+    env: { ...process.env, ...SCRATCH.env },
     stdout: 'inherit',
   }).exited)
 
@@ -240,7 +243,7 @@ async function ytdlp(args: string[]) {
   })
   await updating
   const p = Bun.spawn(['yt-dlp', '--proxy', await proxy, ...args], {
-    env: proxyFreeEnv(),
+    env: { ...proxyFreeEnv(), ...SCRATCH.env },
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: 30 * 60_000,
@@ -253,6 +256,10 @@ async function ytdlp(args: string[]) {
   if (code) throw new Error(err.trim().split('\n').pop() || `yt-dlp ${code}`)
   return { out, err }
 }
+
+// A new file rather than a cached file_id (a local file:// path is new too)
+export const fresh = (f: string | InputFile) =>
+  typeof f !== 'string' || f.startsWith('file:')
 
 // Runs at most max fns at once, the rest wait their turn
 function limit(max: number) {
@@ -294,6 +301,8 @@ async function jar(dir: string) {
   if (!existsSync(JAR)) return []
   taken.set(dir, (await stat(JAR)).mtimeMs)
   await copyFile(JAR, join(dir, 'cookies.txt'))
+  // the job folder may be readable by the Bot API server (scratch.ts), the session isn't
+  await chmod(join(dir, 'cookies.txt'), 0o600)
   return ['--cookies', join(dir, 'cookies.txt')]
 }
 
@@ -429,8 +438,9 @@ function main() {
               ? await api.sendAudio(chat, file(), opts)
               : await api.sendDocument(chat, file(), opts)
     } catch (e) {
-      // a fresh upload Telegram won't take as media still goes as a file
-      if (kind === 'document' || typeof file() === 'string') throw e
+      // a fresh file Telegram won't take as media still goes as a file; a
+      // cached file_id doesn't (a local file:// path is fresh)
+      if (kind === 'document' || !fresh(file())) throw e
       m = await api.sendDocument(chat, file(), opts)
     }
     const media = m.video ?? m.animation ?? m.audio ?? m.document
@@ -498,6 +508,7 @@ function main() {
   ): Promise<File> {
     const dir = await mkdtemp(join(TMP, 'job-'))
     try {
+      await SCRATCH.open(dir)
       const args = [...YTDLP, ...(await jar(dir))]
       let json: string
       try {
@@ -546,6 +557,7 @@ function main() {
       if ((await stat(path)).size > LIMIT) throw new Fail('tooBig')
 
       await status('uploading')
+      await SCRATCH.open(path, true)
       const audio = v.vcodec === 'none'
       const thumb = join(dir, 'thumb.jpg')
       if (!audio)
@@ -561,7 +573,7 @@ function main() {
       const [kind, file_id] = await send(
         dest,
         audio ? 'audio' : 'video',
-        () => new InputFile(path),
+        () => SCRATCH.local(path) ?? new InputFile(path),
         {
           ...options(dest, f),
           width: v.width ?? undefined,
@@ -776,8 +788,7 @@ function main() {
 if (import.meta.main) {
   if (!env.EGRESS_DENY?.trim())
     console.warn("EGRESS_DENY is empty: the host's own public addresses are reachable")
-  await rm(TMP, { recursive: true, force: true })
-  await mkdir(TMP, { recursive: true })
+  await SCRATCH.start()
   await mkdir(DATA, { recursive: true })
   await seedJar()
   await main()

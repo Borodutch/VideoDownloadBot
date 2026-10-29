@@ -1,0 +1,16 @@
+# VideoDownloadBot's downloads and its local Bot API's temp files (agentboard #280): RAM instead of md2,
+# which every database on this host fsyncs to. Tugport bind-mounts it at /scratch into both services.
+[Unit]
+Description=VideoDownloadBot scratch tmpfs (#280)
+Before=docker.service
+
+[Mount]
+What=tmpfs
+Where=/srv/scratch/videodownloadbot
+Type=tmpfs
+# Not noexec: the yt-dlp release binary unpacks and loads its libraries here
+Options=size=64G,mode=1777,nosuid,nodev
+
+[Install]
+WantedBy=local-fs.target
+WantedBy=docker.service

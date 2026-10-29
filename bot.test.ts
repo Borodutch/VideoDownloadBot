@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { InputFile } from 'grammy'
 import type { Message } from 'grammy/types'
 import { Database } from 'bun:sqlite'
 import {
@@ -6,6 +7,7 @@ import {
   answer,
   claims,
   Fail,
+  fresh,
   links,
   notVideo,
   picked,
@@ -298,4 +300,10 @@ test('census: audience by chat type and recency, blocked private chats unreachab
   c.member(2, 'member') // unblocked
   c.seen(2, 2, 'private')
   expect(c.stats().audience.private.unreachable).toBe(0)
+})
+
+test('only cached file_ids skip the document fallback', () => {
+  expect(fresh('BAACAgIAAxkBAAIBY2')).toBe(false)
+  expect(fresh('file:///scratch/bot-a/job-1/v.mp4')).toBe(true)
+  expect(fresh(new InputFile(new Uint8Array(1)))).toBe(true)
 })
