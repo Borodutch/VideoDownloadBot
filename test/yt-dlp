@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 // Stands in for yt-dlp in bot.e2e.test.ts: -J describes the link (one with
 // "long" in it is a 50-minute video, one with "slow" takes 3 s to describe,
-// one with "fail" is unavailable, one with "tweet" is a tweet without a video;
-// the video's id is the v= parameter), a download copies FAKE_MP4 after a while
+// one with "fail" is unavailable, one with "tweet" is a tweet without a video,
+// one with "reel" in it is an Instagram reel and one with "stream" in it a
+// stream, neither saying how long it is; the video's id is the v= parameter),
+// a download copies FAKE_MP4 after a while
 // (one with "crawl" in it takes 9 s, with 2 MB of it on disk meanwhile; one
 // with "broken" in it stops partway, 3 MB in; one with "huge" in it stops 3 MB
 // in without a word, as at --max-filesize; one with "expired" in it fails after
@@ -23,6 +25,8 @@ const url: string =
     ? JSON.parse(readFileSync(args[info + 1]!, 'utf8')).webpage_url
     : args.findLast((a) => a.startsWith('https://'))!
 const long = url.includes('long')
+const reel = url.includes('reel')
+const lengthless = reel || url.includes('stream')
 if (args.includes('-J') && url.includes('fail')) {
   console.error('ERROR: [youtube] x: Video unavailable')
   process.exit(1)
@@ -38,10 +42,10 @@ if (args.includes('-J'))
   console.log(
     JSON.stringify({
       id: new URL(url).searchParams.get('v'),
-      extractor_key: 'Youtube',
+      extractor_key: reel ? 'Instagram' : 'Youtube',
       title: 'Video',
       webpage_url: url,
-      duration: long ? 3000 : 30,
+      duration: lengthless ? undefined : long ? 3000 : 30,
       vcodec: 'h264',
       width: 320,
       height: 240,

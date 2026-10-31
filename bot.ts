@@ -434,10 +434,29 @@ export function limit(max: number, maxLong = max) {
   }
 }
 
-// Long videos: over 10 minutes, or of unknown length
+// What yt-dlp says the formats it picked weigh (video and audio, or the one),
+// undefined for one it doesn't say
+type Weighed = { filesize?: number | null; filesize_approx?: number | null }
+export const sizes = (v: Weighed & { requested_formats?: Weighed[] }) =>
+  (v.requested_formats ?? [v]).map((f) => f.filesize || f.filesize_approx || undefined)
+
+// Long videos: over 10 minutes. One that doesn't say how long it is counts as
+// long too (an HLS/DASH stream or a file of unknown length can take 20-40
+// minutes), unless it's from Instagram or an X post, whose reels and GIFs
+// usually don't say and come in seconds, or yt-dlp says what all of it weighs
+// and that's 100 MB at most (typically under 2 minutes). X is the Twitter key
+// alone: TwitterBroadcast and TwitterSpaces are long HLS replays.
 export const LONG = 10 * 60
-export const isLong = (v: { duration?: number | null }) =>
-  !(v.duration && v.duration > 0 && v.duration <= LONG)
+export const SMALL = 100 * 2 ** 20
+const QUICK = /^(Instagram\w*|Twitter)$/
+export const isLong = (
+  v: Parameters<typeof sizes>[0] & { duration?: number | null; extractor_key?: string },
+) => {
+  if (v.duration && v.duration > 0) return v.duration > LONG
+  if (QUICK.test(v.extractor_key ?? '')) return false
+  const s = sizes(v)
+  return s.includes(undefined) || s.reduce<number>((all, n) => all + n!, 0) > SMALL
+}
 
 // The minutes a job may spend downloading: 45 for a long video, else 30. Some
 // sites (adult CDNs) serve one connection at about 1-1.3 MB/s, where the
@@ -938,12 +957,7 @@ function main() {
       }
       const hit = await fromCache()
       if (hit) return hit
-      const formats: { filesize?: number; filesize_approx?: number }[] =
-        v.requested_formats ?? [v]
-      const size = formats.reduce(
-        (s, f) => s + (f.filesize ?? f.filesize_approx ?? 0),
-        0,
-      )
+      const size = sizes(v).reduce<number>((all, n) => all + (n ?? 0), 0)
       if (size > LIMIT) throw new Fail('tooBig')
 
       const long = isLong(v)

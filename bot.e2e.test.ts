@@ -5,8 +5,9 @@ import { join } from 'node:path'
 
 // The real bot, polling a fake Bot API, with test/yt-dlp standing in for
 // yt-dlp: a link with "long" in it is a 50-minute video that downloads in
-// 3 s, any other a 30-second one that downloads in 0.2 s ("crawl" ones take
-// 9 s, "broken" and "huge" ones fail; test/yt-dlp has the rest).
+// 3 s, one with "reel" (an Instagram reel) or "stream" in it says nothing of
+// its length, any other is a 30-second one; those download in 0.2 s ("crawl"
+// ones take 9 s, "broken" and "huge" ones fail; test/yt-dlp has the rest).
 // MAX_DOWNLOADS=2: one slot for long videos, the other for short ones. env
 // adds to or overrides the bot's environment, delay = how long the fake Bot
 // API takes to answer a call, in ms.
@@ -170,6 +171,37 @@ test.skipIf(skip)(
     expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 dur=30 wait=0\.0 /.test(l))).toHaveLength(1)
     // the second long one waited for the first
     expect(jobs.some((l) => /lane=long ahead=0 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toBe(true)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: an Instagram reel, which doesn't say how long it is, goes out while three long videos download; a stream that doesn't waits",
+  async () => {
+    // the default four slots, three for long videos
+    const bot = start({ MAX_DOWNLOADS: '4' })
+    let jobs: string[] = []
+    const downloading = (chat: number) => bot.statuses(chat).filter((s) => s.startsWith('⏬')).length
+    try {
+      // two users' long links take the three long slots (one user's take two at most)...
+      bot.link(1, 'long1')
+      bot.link(1, 'long2')
+      bot.link(2, 'long3')
+      await bot.until(() => downloading(1) === 2 && downloading(2) === 1)
+      // ...a reel takes the fourth at once, and a stream of unknown length waits for a long one
+      bot.link(3, 'reel1')
+      bot.link(4, 'stream1')
+      await bot.until(() => bot.videos().length === 5)
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.videos()[0]!.chat).toBe(3)
+    expect(bot.statuses(3).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(bot.statuses(4).map((s) => s[0])).toEqual(['⏳', '⏬', '⏫'])
+    expect(jobs).toHaveLength(5)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 dur=3000 wait=0\.0 /.test(l))).toHaveLength(3)
+    expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 dur=\? wait=0\.0 /.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 dur=\? wait=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
   },
   30_000,
 )

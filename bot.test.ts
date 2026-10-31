@@ -24,6 +24,7 @@ import {
   reread,
   sender,
   shown,
+  sizes,
   stale,
   tellQueued,
   THUMB,
@@ -533,16 +534,57 @@ test("limit: one user's burst leaves the others a turn, long ones too", async ()
   expect(check.busy()).toBe(true)
 })
 
-test('isLong: over 10 minutes or of unknown length', () => {
+test('isLong: over 10 minutes; of unknown length too, unless from Instagram or X or 100 MB at most', () => {
   expect(isLong({ duration: 15 })).toBe(false)
   expect(isLong({ duration: 599.9 })).toBe(false)
   expect(isLong({ duration: 600 })).toBe(false)
   expect(isLong({ duration: 601 })).toBe(true)
   // the Eporner videos that held every slot for 20+ minutes (#296)
   expect(isLong({ duration: 2570 })).toBe(true)
+  // no length and no weight: a stream or a file that can take as long
   expect(isLong({})).toBe(true)
   expect(isLong({ duration: null })).toBe(true)
   expect(isLong({ duration: 0 })).toBe(true)
+  expect(isLong({ extractor_key: 'Generic' })).toBe(true)
+  // Instagram's reels usually don't say how long they are, or what they weigh
+  // (#303), nor do X's GIFs
+  const reel = {
+    extractor_key: 'Instagram',
+    duration: null,
+    requested_formats: [{ filesize: null }, { filesize: null }],
+  }
+  expect(isLong(reel)).toBe(false)
+  expect(isLong({ extractor_key: 'InstagramStory' })).toBe(false)
+  expect(isLong({ extractor_key: 'Twitter' })).toBe(false)
+  // ...but a length they do give counts
+  expect(isLong({ ...reel, duration: 1800 })).toBe(true)
+  expect(isLong({ extractor_key: 'Twitter', duration: 3000 })).toBe(true)
+  // X's broadcasts and Spaces are long HLS replays
+  expect(isLong({ extractor_key: 'TwitterBroadcast' })).toBe(true)
+  expect(isLong({ extractor_key: 'TwitterSpaces' })).toBe(true)
+  expect(isLong({ extractor_key: 'NotInstagram' })).toBe(true)
+  // a weight: 100 MB at most is short, video and audio together
+  const MB = 2 ** 20
+  expect(isLong({ filesize: 100 * MB })).toBe(false)
+  expect(isLong({ filesize: 100 * MB + 1 })).toBe(true)
+  expect(isLong({ filesize: null, filesize_approx: 2 * MB })).toBe(false)
+  expect(isLong({ requested_formats: [{ filesize: 60 * MB }, { filesize_approx: 40 * MB }] })).toBe(false)
+  expect(isLong({ requested_formats: [{ filesize: 60 * MB }, { filesize_approx: 41 * MB }] })).toBe(true)
+  // ...only when it says what every part weighs
+  expect(isLong({ requested_formats: [{ filesize: MB }, {}] })).toBe(true)
+  expect(isLong({ filesize: 0 })).toBe(true)
+  // the formats it picked, not the top-level guess
+  expect(isLong({ filesize: MB, requested_formats: [{}, { filesize: MB }] })).toBe(true)
+  // ...and a length goes first
+  expect(isLong({ duration: 3000, filesize: MB })).toBe(true)
+  expect(isLong({ duration: 30, filesize: 1500 * MB })).toBe(false)
+})
+
+test('sizes: what the picked formats weigh, undefined where yt-dlp does not say', () => {
+  expect(sizes({ filesize: 5, filesize_approx: 7 })).toEqual([5])
+  expect(sizes({ filesize: null, filesize_approx: 7 })).toEqual([7])
+  expect(sizes({})).toEqual([undefined])
+  expect(sizes({ filesize: 9, requested_formats: [{ filesize_approx: 3 }, { filesize: 0 }] })).toEqual([3, undefined])
 })
 
 test('tellQueued: private chats and summons hear a link is queued or dropped by a restart, groups otherwise not', () => {
