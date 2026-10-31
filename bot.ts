@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite'
-import { Bot, type Context, GrammyError, InputFile } from 'grammy'
-import type { InputMediaVideo, Message } from 'grammy/types'
+import { type Api, Bot, type Context, GrammyError, InputFile, type Transformer } from 'grammy'
+import type { ApiResponse, InputMediaVideo, Message } from 'grammy/types'
 import { existsSync } from 'node:fs'
 import { chmod, copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -327,6 +327,165 @@ const slot = limit(MAX_DOWNLOADS)
 // queues instead of forking a process each
 const check = limit(2)
 
+// The signal of a progress message, which isn't worth a flood wait. grammY's
+// Node typings have an AbortSignal of their own, which a real one fits.
+type Signal = NonNullable<Parameters<Api['sendMessage']>[3]>
+export const PROGRESS = new AbortController().signal as unknown as Signal
+
+// Telegram's flood control: a 429 says how many seconds until the chat takes
+// messages again (parameters.retry_after, 3-40 s in busy groups). The request
+// waits that long and goes again, up to retries times and max seconds in all,
+// so a burst of links in a group delays the videos instead of losing them.
+// Every 429 starts or extends the chat's flood, the one that ends a request's
+// retries too. While the chat is in a flood, its requests line up and go one
+// at a time: let through together, all but one would hit the limit again and
+// use up their retries. Each has the turn through its own retries and passes
+// it on when it's done, or once it's been gap seconds in flight: an upload
+// can take minutes, and the chat's other requests (and their download slots)
+// mustn't wait for it. A PROGRESS request's 429 comes back at once, and the
+// chat's line still waits the flood out. getUpdates has grammY's own wait,
+// and a chat action would be stale by then. flooded(chat) = whether the chat
+// is in a flood or has a line.
+export function floodWait(retries = 5, max = 120, gap = 1) {
+  // chats in a flood: until when, the end of its line, and the requests in it
+  type Flood = { until: number; last: Promise<void>; size: number }
+  const floods = new Map<string | symbol, Flood>()
+  const over = (f: Flood) => f.until <= Date.now() && !f.size
+  const forget = (chat: string | symbol, f: Flood) => {
+    if (floods.get(chat) === f && over(f)) floods.delete(chat)
+  }
+  // the chat's flood lasts s seconds more at least
+  const hold = (chat: string | symbol, s: number) => {
+    const f = floods.get(chat) ?? { until: 0, last: Promise.resolve(), size: 0 }
+    f.until = Math.max(f.until, Date.now() + s * 1000)
+    floods.set(chat, f)
+    void Bun.sleep(f.until - Date.now()).then(() => forget(chat, f))
+  }
+  // waits for a turn in the chat's line; returns what passes it on
+  const line = async (chat: string | symbol, f: Flood) => {
+    const ahead = f.last
+    let next = () => {}
+    f.last = new Promise<void>((go) => (next = go))
+    f.size++
+    await ahead
+    return () => {
+      f.size--
+      next()
+      forget(chat, f)
+    }
+  }
+  const wait: Transformer = async (prev, method, payload, signal) => {
+    if (method === 'getUpdates' || method === 'sendChatAction')
+      return prev(method, payload, signal)
+    const id = (payload as { chat_id?: number | string } | undefined)?.chat_id
+    // a request without a chat (to an inline message) waits on its own
+    const chat = id === undefined ? Symbol() : String(id)
+    // the seconds a 429 asks to wait, unless it's longer than max
+    const after = (res: ApiResponse<unknown>) => {
+      const s = res.ok || res.error_code !== 429 ? undefined : res.parameters?.retry_after
+      return s === undefined || s > max ? undefined : s
+    }
+    if (signal === PROGRESS) {
+      const res = await prev(method, payload, signal)
+      const s = after(res)
+      if (s !== undefined) hold(chat, s)
+      return res
+    }
+    let tries = 0
+    let waited = 0
+    // passes the chat's turn on, while this request has it
+    let pass: (() => void) | undefined
+    try {
+      for (;;) {
+        const f = floods.get(chat)
+        if (f && !over(f)) {
+          pass ??= await line(chat, f)
+          // another 429 may push the wait out while this one sleeps
+          while (f.until > Date.now()) await Bun.sleep(f.until - Date.now())
+        }
+        const mine = pass
+        const slow = mine
+          ? setTimeout(() => {
+              if (pass !== mine) return
+              pass = undefined
+              mine()
+            }, gap * 1000)
+          : undefined
+        const res = await prev(method, payload, signal).finally(() => clearTimeout(slow))
+        const s = after(res)
+        if (s !== undefined) hold(chat, s)
+        if (s === undefined || (waited += s) > max || ++tries > retries) return res
+        console.error('flood', method, `retry after ${s}`, `${tries}/${retries}`)
+      }
+    } finally {
+      pass?.()
+    }
+  }
+  return Object.assign(wait, {
+    flooded: (chat: number | string) => {
+      const f = floods.get(String(chat))
+      return !!f && !over(f)
+    },
+  })
+}
+
+// A progress status isn't worth a flood wait: waiting it out would hold the
+// job's download slot and use up the chat's messages ahead of the video. It's
+// skipped while the chat is in a flood, and a 429 on it only starts one.
+// show(signal) shows it.
+export async function progress(flooded: boolean, show: (signal: Signal) => Promise<unknown>) {
+  if (flooded) return
+  await show(PROGRESS).catch((e) => {
+    if (!(e instanceof GrammyError && e.error_code === 429)) throw e
+  })
+}
+
+// Sends a file to dest.chat as kind; returns the kind it went as, its file_id
+// and the message
+export const sender = (api: Api) =>
+  async function send(
+    dest: Dest,
+    kind: Kind,
+    file: () => string | InputFile,
+    opts: Opts,
+  ): Promise<[Kind, string, Message]> {
+    const { chat } = dest
+    let m: Message
+    try {
+      m =
+        kind === 'video'
+          ? await api.sendVideo(chat, file(), opts)
+          : kind === 'animation'
+            ? await api.sendAnimation(chat, file(), opts)
+            : kind === 'audio'
+              ? await api.sendAudio(chat, file(), opts)
+              : await api.sendDocument(chat, file(), opts)
+    } catch (e) {
+      // a fresh file Telegram won't take as media still goes as a file; a
+      // cached file_id doesn't (a local file:// path is fresh). A 429 is no
+      // reason to: it's about the chat, not the file, and floodWait has
+      // already waited it out as long as it should.
+      if (
+        kind === 'document' ||
+        !fresh(file()) ||
+        (e instanceof GrammyError && e.error_code === 429)
+      )
+        throw e
+      m = await api.sendDocument(chat, file(), opts)
+    }
+    const media = m.video ?? m.animation ?? m.audio ?? m.document
+    dest.sent = m.message_id
+    if (!media) throw new Error('no file in sent message')
+    const sent = m.video
+      ? 'video'
+      : m.animation
+        ? 'animation'
+        : m.audio
+          ? 'audio'
+          : 'document'
+    return [sent, media.file_id, m]
+  }
+
 // The live cookie jar sits on the data volume, so the session cookies Google
 // rotates survive restarts. COOKIES only seeds it, again whenever it changes.
 const JAR = join(DATA, 'cookies.txt')
@@ -466,6 +625,9 @@ function main() {
   const bot = new Bot(env.TOKEN!, {
     client: { apiRoot: API, timeoutSeconds: 3600 },
   })
+  // every request, ctx.api's too (grammY copies the bot's transformers)
+  const flood = floodWait()
+  bot.api.config.use(flood)
   const jobs = new Map<string, Promise<File>>()
   // Handlers run detached; counted so a deploy lets the running ones finish
   let running = 0
@@ -473,43 +635,12 @@ function main() {
     running++
     return p.finally(() => running--)
   }
+  // The help text goes out detached too: in a flood wait a reply can take
+  // minutes, and updates are handled one at a time
+  const help = (ctx: Context) =>
+    void track(ctx.reply(t(ctx.from?.language_code, 'help')).catch(console.error))
 
-  async function send(
-    dest: Dest,
-    kind: Kind,
-    file: () => string | InputFile,
-    opts: Opts,
-  ): Promise<[Kind, string, Message]> {
-    const { chat } = dest
-    const api = bot.api
-    let m: Message
-    try {
-      m =
-        kind === 'video'
-          ? await api.sendVideo(chat, file(), opts)
-          : kind === 'animation'
-            ? await api.sendAnimation(chat, file(), opts)
-            : kind === 'audio'
-              ? await api.sendAudio(chat, file(), opts)
-              : await api.sendDocument(chat, file(), opts)
-    } catch (e) {
-      // a fresh file Telegram won't take as media still goes as a file; a
-      // cached file_id doesn't (a local file:// path is fresh)
-      if (kind === 'document' || !fresh(file())) throw e
-      m = await api.sendDocument(chat, file(), opts)
-    }
-    const media = m.video ?? m.animation ?? m.audio ?? m.document
-    dest.sent = m.message_id
-    if (!media) throw new Error('no file in sent message')
-    const sent = m.video
-      ? 'video'
-      : m.animation
-        ? 'animation'
-        : m.audio
-          ? 'audio'
-          : 'document'
-    return [sent, media.file_id, m]
-  }
+  const send = sender(bot.api)
 
   const options = (dest: Dest, f: Pick<File, 'title' | 'url'>): Opts => ({
     caption:
@@ -697,21 +828,29 @@ function main() {
   async function handle(ctx: Context, url: string) {
     const lang = ctx.from?.language_code
     let statusId: number | undefined
-    const status = async (key: Key) => {
+    const show = async (key: Key, signal?: Signal) => {
       if (statusId)
         await ctx.api
-          .editMessageText(ctx.chat!.id, statusId, t(lang, key))
+          .editMessageText(ctx.chat!.id, statusId, t(lang, key), undefined, signal)
           .catch(() => {})
       else
         statusId = (
-          await ctx.reply(t(lang, key), {
-            reply_parameters: {
-              message_id: ctx.msg!.message_id,
-              allow_sending_without_reply: true,
+          await ctx.reply(
+            t(lang, key),
+            {
+              reply_parameters: {
+                message_id: ctx.msg!.message_id,
+                allow_sending_without_reply: true,
+              },
             },
-          })
+            signal,
+          )
         ).message_id
     }
+    // progress isn't worth a flood wait; the answer to a failure still waits
+    // its turn
+    const status = (key: Key) =>
+      progress(flood.flooded(ctx.chat!.id), (signal) => show(key, signal))
     const d = ctx.from
       ? promo.decide(ctx.from.id, ctx.chat!.type, lang)
       : null
@@ -733,7 +872,7 @@ function main() {
         summoned(ctx.msg!, ctx.me.username),
         (e as Error).message,
       )
-      if (key) await status(key).catch(() => {})
+      if (key) await show(key).catch(() => {})
     }
   }
 
@@ -752,14 +891,15 @@ function main() {
       },
     })
     if (!url) return
-    const status = (key: Key) =>
+    const status = (key: Key, signal?: Signal) =>
       ctx.api
-        .editMessageTextInline(id, t(lang, key))
+        .editMessageTextInline(id, t(lang, key), undefined, signal)
         .then(() => {}, () => {})
     if (!STORAGE) return status('failed')
     const dest: Dest = { chat: STORAGE }
     try {
-      const f = await deliver(dest, url, status)
+      // progress isn't worth a flood wait, as in handle()
+      const f = await deliver(dest, url, (key) => status(key, PROGRESS))
       const { caption, parse_mode } = options(dest, f)!
       await ctx.api.editMessageMediaInline(id, {
         type: f.kind,
@@ -791,7 +931,7 @@ function main() {
     // a /start from another bot's campaign link (promo.ts); the census above has just added a new chat
     if (ctx.chat.type === 'private' && ctx.from && ctx.match)
       promo.arrived(ctx.from.id, ctx.match, Date.now() / 1000 - (created.get(ctx.chat.id)?.created ?? 0) < 600)
-    return ctx.reply(t(ctx.from?.language_code, 'help'))
+    help(ctx)
   })
   bot.on('message', (ctx) => {
     const found = links(ctx.msg, ctx.me.username)
@@ -801,8 +941,7 @@ function main() {
         .then((wanted) => wanted.forEach((url) => void track(handle(ctx, url))))
         .catch(console.error),
     )
-    if (!found.length && ctx.chat.type === 'private')
-      return ctx.reply(t(ctx.from.language_code, 'help'))
+    if (!found.length && ctx.chat.type === 'private') help(ctx)
   })
   bot.on('guest_message', (ctx) => void track(guest(ctx).catch(console.error)))
   bot.on('my_chat_member', (ctx) => {
@@ -814,7 +953,7 @@ function main() {
       (was === 'left' || was === 'kicked') &&
       (now === 'member' || now === 'administrator')
     )
-      return ctx.reply(t(ctx.from.language_code, 'help'))
+      help(ctx)
   })
   bot.catch((e) => console.error(e.error))
 

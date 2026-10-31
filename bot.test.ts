@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { InputFile } from 'grammy'
+import { Api, InputFile, type Transformer } from 'grammy'
 import type { Message } from 'grammy/types'
 import { Database } from 'bun:sqlite'
 import {
@@ -7,12 +7,16 @@ import {
   answer,
   claims,
   Fail,
+  floodWait,
   fresh,
   links,
   notVideo,
   picked,
   probe,
+  progress,
+  PROGRESS,
   requested,
+  sender,
   shown,
   THUMB,
   unready,
@@ -309,6 +313,292 @@ test('only cached file_ids skip the document fallback', () => {
   expect(fresh('BAACAgIAAxkBAAIBY2')).toBe(false)
   expect(fresh('file:///scratch/bot-a/job-1/v.mp4')).toBe(true)
   expect(fresh(new InputFile(new Uint8Array(1)))).toBe(true)
+})
+
+// What the Bot API answers when the bot hits flood control
+const flood = (after: number) => ({
+  ok: false,
+  error_code: 429,
+  description: `Too Many Requests: retry after ${after}`,
+  parameters: { retry_after: after },
+})
+const sentAs = (kind: 'video' | 'document') => ({
+  ok: true,
+  result: {
+    message_id: 7,
+    date: 0,
+    chat: { id: -100, type: 'supergroup', title: 'g' },
+    [kind]: { file_id: `${kind}-id`, file_unique_id: 'u', width: 1, height: 1, duration: 1 },
+  },
+})
+
+// A fake Bot API server: answer(method, n) is its n-th answer to method
+function fakeApi(answer: (method: string, n: number) => object, wait: Transformer = floodWait()) {
+  const calls: { method: string; at: number }[] = []
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      await req.arrayBuffer()
+      const method = new URL(req.url).pathname.split('/').pop()!
+      calls.push({ method, at: Date.now() })
+      return Response.json(answer(method, calls.filter((c) => c.method === method).length))
+    },
+  })
+  const api = new Api('1:test', { apiRoot: `http://localhost:${server.port}` })
+  api.config.use(wait)
+  return { api, calls, methods: () => calls.map((c) => c.method), stop: () => server.stop(true) }
+}
+
+// A finished download, sent by path as in job()
+async function video<T>(fn: (path: string) => Promise<T>) {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'send-'))
+  try {
+    await Bun.write(join(dir, 'v.mp4'), 'video')
+    return await fn(join(dir, 'v.mp4'))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('send: a 429 waits retry_after and sends the video again, never as a document', async () => {
+  const fake = fakeApi((method, n) => (method === 'sendVideo' && n === 1 ? flood(1) : sentAs('video')))
+  try {
+    const dest: { chat: number; sent?: number } = { chat: -100 }
+    const [kind, id] = await video((path) =>
+      sender(fake.api)(dest, 'video', () => new InputFile(path), { caption: 'x' }),
+    )
+    expect([kind, id, dest.sent]).toEqual(['video', 'video-id', 7])
+    expect(fake.methods()).toEqual(['sendVideo', 'sendVideo'])
+    expect(fake.calls[1]!.at - fake.calls[0]!.at).toBeGreaterThanOrEqual(990)
+  } finally {
+    fake.stop()
+  }
+})
+
+test('send: a 429 that outlasts the retries fails without a document fallback', async () => {
+  const fake = fakeApi(() => flood(0.01), floodWait(1))
+  try {
+    const sent = video((path) =>
+      sender(fake.api)({ chat: -100 }, 'video', () => new InputFile(path), { caption: 'x' }),
+    )
+    await expect(sent).rejects.toMatchObject({ error_code: 429 })
+    expect(fake.methods()).toEqual(['sendVideo', 'sendVideo'])
+  } finally {
+    fake.stop()
+  }
+})
+
+test('send: a status 429 comes back at once, and the video waits out the flood it started', async () => {
+  const fake = fakeApi((method) => (method === 'sendMessage' ? flood(1) : sentAs('video')))
+  try {
+    await expect(fake.api.sendMessage(-100, '⏫', undefined, PROGRESS)).rejects.toMatchObject({
+      error_code: 429,
+    })
+    const [kind] = await video((path) =>
+      sender(fake.api)({ chat: -100 }, 'video', () => new InputFile(path), { caption: 'x' }),
+    )
+    expect(kind).toBe('video')
+    expect(fake.methods()).toEqual(['sendMessage', 'sendVideo'])
+    expect(fake.calls[1]!.at - fake.calls[0]!.at).toBeGreaterThanOrEqual(990)
+  } finally {
+    fake.stop()
+  }
+})
+
+test('send: a fresh file Telegram refuses as a video still goes as a document', async () => {
+  const fake = fakeApi((method) =>
+    method === 'sendVideo'
+      ? { ok: false, error_code: 400, description: 'Bad Request: VIDEO_CONTENT_TYPE_INVALID' }
+      : sentAs('document'),
+  )
+  try {
+    const [kind] = await video((path) =>
+      sender(fake.api)({ chat: -100 }, 'video', () => new InputFile(path), { caption: 'x' }),
+    )
+    expect(kind).toBe('document')
+    expect(fake.methods()).toEqual(['sendVideo', 'sendDocument'])
+  } finally {
+    fake.stop()
+  }
+})
+
+// floodWait around a fake API call: answer(method, n) is the n-th answer
+// overall; calls has each call's method, chat and ms since the start
+function flooding(
+  answer: (method: string, n: number) => object | Promise<object>,
+  retries?: number,
+  max?: number,
+  gap?: number,
+) {
+  const start = Date.now()
+  const calls: [string, unknown, number][] = []
+  const prev = async (method: string, payload?: { chat_id?: unknown }) => {
+    calls.push([method, payload?.chat_id, Date.now() - start])
+    return answer(method, calls.length)
+  }
+  const wait = floodWait(retries, max, gap)
+  const call = (method: string, payload?: object, signal?: typeof PROGRESS) =>
+    wait(prev as never, method as never, payload as never, signal) as Promise<{ ok: boolean }>
+  return { call, calls, flooded: wait.flooded }
+}
+
+test('floodWait: retries a 429 after retry_after, a bounded number of times', async () => {
+  const ok = { ok: true, result: true }
+  const once = flooding((_, n) => (n === 1 ? flood(0.2) : ok))
+  expect(await once.call('editMessageText', { chat_id: 1 })).toEqual(ok)
+  expect(once.calls.length).toBe(2)
+  expect(once.calls[1]![2]).toBeGreaterThanOrEqual(190)
+  // still flooded after the retries: Telegram's answer goes back as it is
+  const always = flooding(() => flood(0.01), 2)
+  expect(await always.call('sendMessage', { chat_id: 1 })).toEqual(flood(0.01))
+  expect(always.calls.length).toBe(3)
+  // a wait longer than max fails at once
+  const long = flooding(() => flood(121))
+  expect(await long.call('sendVideo', { chat_id: 1 })).toEqual(flood(121))
+  expect(long.calls.length).toBe(1)
+  // and so does one that would take the waits past max in all: 0.1 + 0.1 s
+  // fit in 0.25 s, a third 0.1 s doesn't
+  const most = flooding(() => flood(0.1), 5, 0.25)
+  expect(await most.call('sendVideo', { chat_id: 1 })).toEqual(flood(0.1))
+  expect(most.calls.length).toBe(3)
+  // other errors aren't retried
+  const bad = { ok: false, error_code: 400, description: 'Bad Request: chat not found' }
+  const other = flooding(() => bad)
+  expect(await other.call('sendMessage', { chat_id: 1 })).toEqual(bad)
+  expect(other.calls.length).toBe(1)
+})
+
+test('floodWait: not for getUpdates (grammY waits) or chat actions (stale by then)', async () => {
+  for (const method of ['getUpdates', 'sendChatAction']) {
+    const f = flooding(() => flood(0.01))
+    expect(await f.call(method, { chat_id: 1 })).toEqual(flood(0.01))
+    expect(f.calls.length).toBe(1)
+  }
+})
+
+test("floodWait: a chat's other requests wait out its flood, other chats don't", async () => {
+  const f = flooding((_, n) => (n === 1 ? flood(1) : { ok: true, result: true }))
+  const sending = f.call('sendVideo', { chat_id: -100 })
+  await Bun.sleep(50)
+  expect([f.flooded(-100), f.flooded('-100'), f.flooded(-200)]).toEqual([true, true, false])
+  const edit = f.call('editMessageText', { chat_id: '-100' }) // the same chat
+  const elsewhere = f.call('sendMessage', { chat_id: -200 })
+  const inline = f.call('editMessageTextInline', { inline_message_id: 'x' })
+  await Promise.all([sending, edit, elsewhere, inline])
+  const at = (method: string) => f.calls.filter((c) => c[0] === method).map((c) => c[2])
+  expect(at('sendVideo').length).toBe(2)
+  expect(at('sendVideo')[1]).toBeGreaterThanOrEqual(990)
+  expect(at('editMessageText')[0]).toBeGreaterThanOrEqual(990)
+  // at once, with slack for a loaded machine
+  expect(at('sendMessage')[0]).toBeLessThan(900)
+  expect(at('editMessageTextInline')[0]).toBeLessThan(900)
+  // the line is gone with its last request
+  expect(f.flooded(-100)).toBe(false)
+})
+
+test("floodWait: progress isn't waited out, but the chat's line waits for its flood", async () => {
+  const ok = { ok: true, result: true }
+  const f = flooding((_, n) => (n === 1 ? flood(0.5) : ok))
+  // the status that trips the flood comes back at once
+  expect(await f.call('sendMessage', { chat_id: -100 }, PROGRESS)).toEqual(flood(0.5))
+  expect(f.flooded(-100)).toBe(true)
+  // the video doesn't go into it
+  expect(await f.call('sendVideo', { chat_id: -100 })).toEqual(ok)
+  expect(f.calls.map((c) => c[0])).toEqual(['sendMessage', 'sendVideo'])
+  expect(f.calls[1]![2]).toBeGreaterThanOrEqual(490)
+  expect(f.flooded(-100)).toBe(false)
+  // with nobody in its line, the flood ends on its own
+  const g = flooding(() => flood(0.2))
+  await g.call('editMessageText', { chat_id: 1 }, PROGRESS)
+  expect(g.flooded(1)).toBe(true)
+  await Bun.sleep(600) // slack for a loaded machine
+  expect([g.flooded(1), g.calls.length]).toEqual([false, 1])
+})
+
+test('floodWait: a burst into a flooded chat goes one at a time, none runs out of retries', async () => {
+  // a group's limit, scaled down: one message per 50 ms, and a 429 says how
+  // long until the next one (rounded up, as Telegram's whole seconds are)
+  let last = -Infinity
+  const f = flooding(() => {
+    const gap = Date.now() - last
+    if (gap < 50) return flood(Math.ceil((50 - gap) / 10) / 100)
+    last = Date.now()
+    return { ok: true, result: true }
+  }, 4)
+  // let through together, the last of 8 would need 7 retries
+  const sent = await Promise.all([...Array(8)].map(() => f.call('sendVideo', { chat_id: -100 })))
+  expect(sent.map((r) => r.ok)).toEqual(Array(8).fill(true))
+})
+
+test("floodWait: a slow upload holds the chat's line gap seconds at most", async () => {
+  // the video's retry takes 1 s to upload, the line's gap is 0.2 s
+  const f = flooding(
+    async (method, n) => {
+      if (n === 1) return flood(0.1)
+      if (method === 'sendVideo') await Bun.sleep(1000)
+      return { ok: true, result: true }
+    },
+    5,
+    120,
+    0.2,
+  )
+  const sending = f.call('sendVideo', { chat_id: -100 })
+  await Bun.sleep(50)
+  expect(f.flooded(-100)).toBe(true)
+  await f.call('deleteMessage', { chat_id: -100 })
+  // the delete waits out the flood and the gap, not the upload
+  const deleted = f.calls.find((c) => c[0] === 'deleteMessage')![2]
+  expect(deleted).toBeGreaterThanOrEqual(290)
+  expect(deleted).toBeLessThan(900)
+  // the flood is over and nobody waits: the chat is back to normal while the
+  // upload goes on
+  expect(f.flooded(-100)).toBe(false)
+  expect((await sending).ok).toBe(true)
+})
+
+test('floodWait: a 429 that ends the retries still holds the chat until the flood is over', async () => {
+  const ok = { ok: true, result: true }
+  const f = flooding((_, n) => (n === 1 ? flood(0.3) : ok), 0)
+  expect(await f.call('sendVideo', { chat_id: -100 })).toEqual(flood(0.3))
+  expect(f.flooded(-100)).toBe(true)
+  // the next request doesn't walk into it
+  expect(await f.call('sendMessage', { chat_id: -100 })).toEqual(ok)
+  expect(f.calls[1]![2]).toBeGreaterThanOrEqual(290)
+  expect(f.flooded(-100)).toBe(false)
+})
+
+test("progress: a 429 on it comes back at once and skips the chat's next ones, other errors fail", async () => {
+  const wait = floodWait()
+  const fake = fakeApi(
+    (_, n) => (n === 1 ? flood(0.3) : { ok: false, error_code: 400, description: 'Bad Request: chat not found' }),
+    wait,
+  )
+  try {
+    const signals: unknown[] = []
+    const show = (signal: typeof PROGRESS) => {
+      signals.push(signal)
+      return fake.api.sendMessage(-100, '⏬', undefined, signal)
+    }
+    const start = Date.now()
+    await progress(wait.flooded(-100), show)
+    expect(Date.now() - start).toBeLessThan(250)
+    expect(signals).toHaveLength(1)
+    expect(signals[0]).toBe(PROGRESS)
+    // skipped while the chat is in the flood it started
+    expect(wait.flooded(-100)).toBe(true)
+    await progress(wait.flooded(-100), show)
+    expect(fake.methods()).toEqual(['sendMessage'])
+    // after it, any other error still fails the job
+    await Bun.sleep(400)
+    expect(wait.flooded(-100)).toBe(false)
+    await expect(progress(wait.flooded(-100), show)).rejects.toMatchObject({ error_code: 400 })
+    expect(fake.methods()).toEqual(['sendMessage', 'sendMessage'])
+  } finally {
+    fake.stop()
+  }
 })
 
 test('shown: sample aspect ratio and rotation', () => {
