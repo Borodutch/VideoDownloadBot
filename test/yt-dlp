@@ -1,10 +1,19 @@
 #!/usr/bin/env bun
 // Stands in for yt-dlp in bot.e2e.test.ts: -J describes the link (one with
 // "long" in it is a 50-minute video, one with "slow" takes 3 s to describe,
-// one with "fail" is unavailable, one with "tweet" is a tweet without a
-// video; the video's id is the v= parameter), a download copies FAKE_MP4
-// after a while
-import { copyFileSync, readFileSync } from 'node:fs'
+// one with "fail" is unavailable, one with "tweet" is a tweet without a video;
+// the video's id is the v= parameter), a download copies FAKE_MP4 after a while
+// (one with "crawl" in it takes 9 s, with 2 MB of it on disk meanwhile; one
+// with "broken" in it stops partway, 3 MB in; one with "huge" in it stops 3 MB
+// in without a word, as at --max-filesize; one with "expired" in it fails after
+// 4 s from saved info, as an expired media link would, and crawls from the
+// page; one with "ffmpeg" in it, 2 MB in, waits 20 s for a child that has its
+// stdout and stderr, as yt-dlp waits for the ffmpeg it hands m3u8 to, a child
+// that ignores SIGTERM when "stubborn" is in it too; one with "linger" in it
+// leaves a process in its group that doesn't hold its output and outlives it
+// by 15 s, writing "up", then "done" or "TERM" if it got SIGTERM, to
+// $LINGER/<id>.<its pid>)
+import { copyFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 const args = process.argv.slice(2)
 if (args.includes('--update-to') || args.includes('--list-extractors')) process.exit(0)
@@ -22,6 +31,8 @@ if (args.includes('-J') && url.includes('tweet')) {
   console.error('ERROR: [twitter] 123: No video could be found in this tweet')
   process.exit(1)
 }
+const expired = url.includes('expired')
+const crawl = url.includes('crawl') || (expired && info < 0)
 if (args.includes('-J') && url.includes('slow')) await Bun.sleep(3000)
 if (args.includes('-J'))
   console.log(
@@ -37,8 +48,34 @@ if (args.includes('-J'))
     }),
   )
 else {
-  await Bun.sleep(long ? 3000 : 200)
   const out = args[args.indexOf('-o') + 1]!.replace('%(ext)s', 'mp4')
+  if (expired && info >= 0) {
+    await Bun.sleep(4000)
+    console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden')
+    process.exit(1)
+  }
+  if (url.includes('ffmpeg')) {
+    writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
+    const child = url.includes('stubborn') ? ['sh', '-c', "trap '' TERM; exec sleep 20"] : ['sleep', '20']
+    await Bun.spawn(child, { stdout: 'inherit', stderr: 'inherit' }).exited
+  }
+  if (url.includes('linger'))
+    Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap 'echo TERM >> "$log"; exit' TERM; echo up >> "$log"; sleep 15 & wait; echo done >> "$log"`], {
+      env: { ...process.env, V: new URL(url).searchParams.get('v')! },
+      stdio: ['ignore', 'ignore', 'ignore'],
+    }).unref()
+  if (crawl) writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
+  await Bun.sleep(crawl ? 9000 : long ? 3000 : 200)
+  if (url.includes('broken')) {
+    writeFileSync(`${out}.part`, new Uint8Array(3 * 2 ** 20))
+    console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden')
+    process.exit(1)
+  }
+  if (url.includes('huge')) {
+    writeFileSync(`${out}.part`, new Uint8Array(3 * 2 ** 20))
+    process.exit(0)
+  }
+  rmSync(`${out}.part`, { force: true })
   copyFileSync(process.env.FAKE_MP4!, out)
   console.log(out)
 }

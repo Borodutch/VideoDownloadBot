@@ -6,6 +6,7 @@ import {
   census,
   answer,
   claims,
+  downloadMinutes,
   Fail,
   floodWait,
   fresh,
@@ -13,6 +14,8 @@ import {
   limit,
   links,
   notVideo,
+  onDisk,
+  outcome,
   picked,
   probe,
   progress,
@@ -24,6 +27,7 @@ import {
   stale,
   tellQueued,
   THUMB,
+  Timeout,
   unready,
   unstarted,
   urls,
@@ -549,16 +553,59 @@ test('tellQueued: private chats and summons hear a link is queued or dropped by 
   expect(tellQueued('supergroup', false)).toBe(false)
 })
 
-test('reread: a failed download reads the page again only from info over a minute old, not after a timeout', () => {
-  const expired = 'ERROR: unable to download video data: HTTP Error 403: Forbidden'
-  expect(reread(30_000, expired)).toBe(false)
-  expect(reread(5 * 60_000, expired)).toBe(true)
-  expect(reread(5 * 60_000, 'yt-dlp timed out after 30 min')).toBe(false)
-  // yt-dlp's own network timeouts are no reason not to
-  expect(reread(5 * 60_000, 'ERROR: unable to download video data: Read timed out. (read timeout=20.0)')).toBe(true)
-  expect(reread(5 * 60_000, 'ERROR: Connection to cdn.example timed out. (connect timeout=20.0)')).toBe(true)
+test('reread: a failed download reads the page again only from info over a minute old, with over a minute of its time left', () => {
+  // an expired link's 403, or yt-dlp's own network timeout ("Read timed
+  // out", 20 s), fails early, with time left
+  expect(reread(30_000, 40 * 60_000)).toBe(false)
+  expect(reread(5 * 60_000, 40 * 60_000)).toBe(true)
+  // a timeout leaves no time, a late failure too little for another try
+  expect(reread(5 * 60_000, 0)).toBe(false)
+  expect(reread(5 * 60_000, -2_000)).toBe(false)
+  expect(reread(5 * 60_000, 50_000)).toBe(false)
   // the same age makes a download from saved info stop at a missing fragment
   expect([stale(30_000), stale(5 * 60_000)]).toEqual([false, true])
+})
+
+test('downloadMinutes: a long video may download for 45 minutes, a short one for 30', () => {
+  expect(downloadMinutes(false)).toBe(30)
+  expect(downloadMinutes(true)).toBe(45)
+  // the biggest file a local Bot API takes, at the slowest rate measured on
+  // Eporner (0.97 MB/s, #298), fits in the long lane's time only
+  const minutes = (2000 * 2 ** 20) / 0.97e6 / 60
+  expect(minutes).toBeGreaterThan(downloadMinutes(false))
+  expect(minutes).toBeLessThan(downloadMinutes(true))
+  expect(downloadMinutes(isLong({ duration: 50 * 60 }))).toBe(45)
+  expect(downloadMinutes(isLong({ duration: 5 * 60 }))).toBe(30)
+})
+
+test('outcome: what the job log calls a failed job', () => {
+  expect(outcome(new Fail('tooBig'))).toBe('fail:tooBig')
+  expect(outcome(new Fail(null))).toBe('fail:quiet')
+  expect(outcome(new Timeout('yt-dlp timed out after 45 min'))).toBe('timeout')
+  expect(outcome(new Error('ERROR: unable to download video data: HTTP Error 403: Forbidden'))).toBe('error')
+})
+
+test('onDisk: MB of the media files in a job dir, partial ones too', async () => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'job-'))
+  try {
+    expect(await onDisk(dir)).toBe(0)
+    // a DASH download halfway: the video part, the audio done, and the
+    // bot's info.json and cookie jar, which don't count
+    await writeFile(join(dir, 'v.f137.mp4.part'), new Uint8Array(3 * 2 ** 20))
+    await writeFile(join(dir, 'v.f140.m4a'), new Uint8Array(2 ** 20))
+    await writeFile(join(dir, 'info.json'), new Uint8Array(2 ** 20))
+    await writeFile(join(dir, 'cookies.txt'), new Uint8Array(2 ** 20))
+    expect(await onDisk(dir)).toBe(4)
+    // nor does the file a merge writes from the parts
+    await writeFile(join(dir, 'v.temp.mp4'), new Uint8Array(2 * 2 ** 20))
+    expect(await onDisk(dir)).toBe(4)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+  expect(await onDisk(dir)).toBe(0)
 })
 
 test('only cached file_ids skip the document fallback', () => {

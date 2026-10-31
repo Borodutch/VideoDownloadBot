@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite'
 import { type Api, Bot, type Context, GrammyError, InputFile, type Transformer } from 'grammy'
 import type { ApiResponse, InputMediaVideo, Message } from 'grammy/types'
 import { existsSync } from 'node:fs'
-import { chmod, copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { egressProxy, proxyFreeEnv } from './egress'
 import { DRAIN, pollWithHandover } from './handover'
@@ -20,6 +20,9 @@ const DATA = env.DATA_DIR || './data'
 const SCRATCH = scratch(API.includes('api.telegram.org') ? '' : undefined)
 const TMP = SCRATCH.dir
 const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 4)
+// A minute, in ms, of the download time limits and of how old saved info may
+// get (bot.e2e.test.ts shortens it)
+const MINUTE = Number(env.MINUTE_MS) || 60_000
 // Only formats whose every request goes through the proxy: yt-dlp's own HTTP
 // (HLS, DASH, websockets) and ffmpeg's http(s), which yt-dlp hands the proxy
 // to. rtmp, rtsp and mms would connect directly.
@@ -246,6 +249,9 @@ const update = () =>
     timeout: 5 * 60_000,
   }).exited)
 
+// yt-dlp ran out of time and was stopped
+export class Timeout extends Error {}
+
 async function ytdlp(args: string[], timeout = 30 * 60_000) {
   // a failed listen isn't kept: the next download tries again
   proxy ??= egressProxy().catch((e) => {
@@ -254,25 +260,45 @@ async function ytdlp(args: string[], timeout = 30 * 60_000) {
   })
   await updating
   const via = await proxy
-  const start = Date.now()
+  // In a process group of its own: yt-dlp hands m3u8 and some HLS downloads
+  // to ffmpeg, which inherits its pipes and goes on when yt-dlp alone is
+  // stopped, so the time limit stops the whole group
   const p = Bun.spawn(['yt-dlp', '--proxy', via, ...args], {
     env: { ...proxyFreeEnv(), ...SCRATCH.env },
     stdout: 'pipe',
     stderr: 'pipe',
-    timeout,
+    detached: true,
   })
-  const [out, err, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ])
-  if (code)
-    throw new Error(
-      Date.now() - start >= timeout
-        ? `yt-dlp timed out after ${timeout / 60_000} min`
-        : err.trim().split('\n').pop() || `yt-dlp ${code}`,
-    )
-  return { out, err }
+  // the group, or yt-dlp alone if there's no group
+  const kill = (signal: NodeJS.Signals) => {
+    try {
+      process.kill(-p.pid, signal)
+    } catch {
+      p.kill(signal)
+    }
+  }
+  let late = false
+  const timers = [
+    setTimeout(() => {
+      late = true
+      kill('SIGTERM')
+    }, timeout),
+    // for whatever is still running 5 s later
+    setTimeout(() => kill('SIGKILL'), timeout + 5_000),
+  ]
+  try {
+    const [out, err, code] = await Promise.all([
+      new Response(p.stdout).text(),
+      new Response(p.stderr).text(),
+      p.exited,
+    ])
+    if (code && late)
+      throw new Timeout(`yt-dlp timed out after ${+(timeout / 60_000).toFixed(1)} min`)
+    if (code) throw new Error(err.trim().split('\n').pop() || `yt-dlp ${code}`)
+    return { out, err }
+  } finally {
+    for (const t of timers) clearTimeout(t)
+  }
 }
 
 type Size = { width: number; height: number }
@@ -413,14 +439,21 @@ export const LONG = 10 * 60
 export const isLong = (v: { duration?: number | null }) =>
   !(v.duration && v.duration > 0 && v.duration <= LONG)
 
+// The minutes a job may spend downloading: 45 for a long video, else 30. Some
+// sites (adult CDNs) serve one connection at about 1-1.3 MB/s, where the
+// biggest file a local Bot API takes (2000 MB) can need about 35 minutes, and
+// a flat 30 cut off about 8 downloads a day, mostly from such sites (#298).
+// With two or more slots long videos leave short ones a slot, so the longer
+// limit mostly holds up other long ones.
+export const downloadMinutes = (long: boolean) => (long ? 45 : 30)
+
 // yt-dlp's saved info over a minute old: its media links may have expired
 // while the job waited its turn
-export const stale = (age: number) => age > 60_000
-// Whether a download from stale saved info that failed gets another try
-// that reads the page again: not after it ran out of time (ytdlp's own
-// error; yt-dlp's network errors can say "timed out" too)
-export const reread = (age: number, why: string) =>
-  stale(age) && !/^yt-dlp timed out after /.test(why)
+export const stale = (age: number) => age > MINUTE
+// Whether a download from stale saved info that failed gets another try that
+// reads the page again, in the time the job has left: when over a minute is
+// (none is, after a timeout)
+export const reread = (age: number, left: number) => stale(age) && left > MINUTE
 
 // The slots for downloading and sending videos. Long ones (20-40 min each on
 // some sites) take at most MAX_DOWNLOADS - 1 of them (with one slot, that
@@ -702,6 +735,21 @@ const esc = (s: string) =>
 // Seconds since t, for the job log
 const elapsed = (t: number) => ((Date.now() - t) / 1000).toFixed(1)
 
+// MB of media in a job's dir, downloaded so far or done (yt-dlp names it all
+// v.*), not counting the v.temp.* a merge or fixup writes from the rest
+export async function onDisk(dir: string) {
+  let bytes = 0
+  for (const f of await readdir(dir).catch(() => []))
+    if (f.startsWith('v.') && !f.startsWith('v.temp.'))
+      bytes += (await stat(join(dir, f)).catch(() => undefined))?.size ?? 0
+  return Math.round(bytes / 2 ** 20)
+}
+
+// How a job that threw e ends in the job log: fail:<what the chat was told>,
+// timeout (the download ran out of time) or error
+export const outcome = (e: unknown) =>
+  e instanceof Fail ? `fail:${e.key ?? 'quiet'}` : e instanceof Timeout ? 'timeout' : 'error'
+
 function main() {
   const db = new Database(join(DATA, 'bot.sqlite'), { create: true })
   db.run(
@@ -808,7 +856,8 @@ function main() {
       void bot.api.sendChatAction(dest.chat, 'upload_video').catch(() => {})
     // One line per job, for where the time goes (in seconds): the wait for a
     // yt-dlp -J turn and the run, the wait for a slot and how many jobs were
-    // ahead, the download, and probe, thumbnail and upload together
+    // ahead, the download (a failed one too, with the MB it got), and probe,
+    // thumbnail and upload together
     const log: Record<string, string | number> = { host: new URL(url).hostname }
     const start = Date.now()
     let result = 'ok'
@@ -818,7 +867,7 @@ function main() {
       if (!log.up) result = 'cached'
       return f
     } catch (e) {
-      result = e instanceof Fail ? `fail:${e.key ?? 'quiet'}` : 'error'
+      result = outcome(e)
       throw e
     } finally {
       log.total = elapsed(start)
@@ -913,32 +962,49 @@ function main() {
 
       await status('downloading')
       await Bun.write(join(dir, 'info.json'), json)
-      const grab = (source: string[]) =>
-        ytdlp([
-          ...args,
-          ...source,
-          '-o', join(dir, 'v.%(ext)s'),
-          '--max-filesize', String(LIMIT),
-          '--print', 'after_move:filepath',
-        ])
+      const grab = (source: string[], timeout: number) =>
+        ytdlp(
+          [
+            ...args,
+            ...source,
+            '-o', join(dir, 'v.%(ext)s'),
+            '--max-filesize', String(LIMIT),
+            '--print', 'after_move:filepath',
+          ],
+          timeout,
+        )
       const fetched = Date.now()
       const age = fetched - extracted
-      const { out, err } = await grab([
-        '--load-info-json', join(dir, 'info.json'),
-        // a fragment lost to an expired link fails it (and it reads the page
-        // again) rather than leave a gap in the video
-        ...(stale(age) ? ['--abort-on-unavailable-fragments'] : []),
-      ]).catch((e) => {
-        if (!reread(age, String(e.message))) throw e
-        log.reread = 1
-        return grab([url])
-      })
+      const budget = downloadMinutes(long) * MINUTE
+      const { out, err } = await grab(
+        [
+          '--load-info-json', join(dir, 'info.json'),
+          // a fragment lost to an expired link fails it (and it reads the page
+          // again) rather than leave a gap in the video
+          ...(stale(age) ? ['--abort-on-unavailable-fragments'] : []),
+        ],
+        budget,
+      )
+        .catch((e) => {
+          const left = budget - (Date.now() - fetched)
+          if (!reread(age, left)) throw e
+          log.reread = 1
+          return grab([url], left)
+        })
+        .catch(async (e) => {
+          // how far a failed download got, for the site's speed
+          log.dl = elapsed(fetched)
+          log.mb = await onDisk(dir)
+          throw e
+        })
       log.dl = elapsed(fetched)
       const path = out.trim().split('\n').pop()
       // --print implies --quiet, so a file over --max-filesize is skipped
       // with exit 0 and no output at all
-      if (!path || !existsSync(path))
+      if (!path || !existsSync(path)) {
+        log.mb = await onDisk(dir)
         throw new Fail(err.trim() ? 'failed' : 'tooBig', err)
+      }
       const bytes = (await stat(path)).size
       log.mb = Math.round(bytes / 2 ** 20)
       if (bytes > LIMIT) throw new Fail('tooBig')

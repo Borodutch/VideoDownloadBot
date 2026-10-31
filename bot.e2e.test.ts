@@ -1,13 +1,15 @@
 import { expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 // The real bot, polling a fake Bot API, with test/yt-dlp standing in for
 // yt-dlp: a link with "long" in it is a 50-minute video that downloads in
-// 3 s, any other a 30-second one that downloads in 0.2 s. MAX_DOWNLOADS=2:
-// one slot for long videos, the other for short ones. env = more variables,
-// delay = how long the fake Bot API takes to answer a call, in ms.
+// 3 s, any other a 30-second one that downloads in 0.2 s ("crawl" ones take
+// 9 s, "broken" and "huge" ones fail; test/yt-dlp has the rest).
+// MAX_DOWNLOADS=2: one slot for long videos, the other for short ones. env
+// adds to or overrides the bot's environment, delay = how long the fake Bot
+// API takes to answer a call, in ms.
 type Call = { method: string; chat: number; text?: string; upload?: boolean; inline?: string }
 function start(env: Record<string, string> = {}, delay: (call: Call) => number = () => 0) {
   const work = mkdtempSync(join(tmpdir(), 'bot-e2e-'))
@@ -108,8 +110,8 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
     },
     // the status texts the guest replies got
     inline: () => calls.filter((c) => c.inline && c.method === 'editMessageText').map((c) => c.text!),
-    async until(done: () => boolean) {
-      for (let i = 0; i < 300 && !done(); i++) await Bun.sleep(50)
+    async until(done: () => boolean, ms = 15_000) {
+      for (let i = 0; i < ms / 50 && !done(); i++) await Bun.sleep(50)
       expect(done()).toBe(true)
     },
     videos: () => calls.filter((c) => c.method === 'sendVideo'),
@@ -556,4 +558,152 @@ test.skipIf(skip)(
     expect(jobs.filter((l) => /^job fail:restarting .* dl=/.test(l))).toHaveLength(1)
   },
   30_000,
+)
+
+test.skipIf(skip)(
+  'bot: a failed download logs how long it ran and the MB it got',
+  async () => {
+    const bot = start()
+    let jobs: string[] = []
+    try {
+      // one fails with an error, the other ends without a file or a word
+      bot.link(1, 'broken1')
+      bot.link(2, 'huge1')
+      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))))
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.videos()).toHaveLength(0)
+    for (const chat of [1, 2]) expect(bot.statuses(chat).map((s) => [...s][0])).toEqual(['⏬', '😱'])
+    expect(jobs).toHaveLength(2)
+    const line = (result: string) => jobs.find((l) => l.startsWith(`job ${result} `))
+    expect(line('error')).toMatch(/^job error host=www\.youtube\.com .*lane=short ahead=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
+    expect(line('fail:tooBig')).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=short ahead=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  'bot: the time limit also stops a child of yt-dlp that holds its output, as ffmpeg does',
+  async () => {
+    // a minute is 250 ms, so a short video's job has 7.5 s, and the child
+    // would keep yt-dlp's stdout and stderr open for 20 s; the second one's
+    // child ignores SIGTERM, so it takes the SIGKILL 5 s later
+    const bot = start({ MINUTE_MS: '250' })
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'ffmpeg1')
+      bot.link(2, 'stubbornffmpeg1')
+      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))), 25_000)
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.videos()).toHaveLength(0)
+    for (const chat of [1, 2]) expect(bot.statuses(chat).map((s) => [...s][0])).toEqual(['⏬', '😱'])
+    expect(jobs).toHaveLength(2)
+    for (const line of jobs)
+      expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=short .* dl=\d+\.\d mb=2 total=/)
+    const [term, kill] = jobs.map((l) => Number(/ dl=([\d.]+)/.exec(l)![1])).sort((a, b) => a - b)
+    expect(term).toBeGreaterThanOrEqual(7.5)
+    expect(term).toBeLessThan(9)
+    expect(kill).toBeGreaterThanOrEqual(12.5)
+    expect(kill).toBeLessThan(14)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: the time limit's signals end with yt-dlp's run",
+  async () => {
+    // a minute is 250 ms, so a short video's job has 7.5 s, and the SIGKILL
+    // would come 5 s later. linger1's yt-dlp is done in 0.2 s, and
+    // lingerbroken1's fails then, but each leaves a process in its group that
+    // doesn't hold its output and lives 15 s: once a run is over, whichever
+    // way it ended, neither signal may reach its group (by then the number
+    // could lead another one)
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
+    // each lingering process's log, by its link (a page read again is
+    // another run, with a process of its own)
+    const logs = () => readdirSync(dir).map((f) => [f.split('.')[0]!, readFileSync(join(dir, f), 'utf8')] as const)
+    const bot = start({ MINUTE_MS: '250', LINGER: dir })
+    let jobs: string[] = []
+    let seen: ReturnType<typeof logs> = []
+    try {
+      bot.link(1, 'linger1')
+      bot.link(2, 'lingerbroken1')
+      await bot.until(() => bot.videos().length === 1 && bot.statuses(2).some((s) => s.startsWith('😱')))
+      // past both signals' times
+      for (let i = 0; i < 400 && !(logs().length >= 2 && logs().every(([, l]) => /TERM|done/.test(l))); i++)
+        await Bun.sleep(50)
+      seen = logs()
+    } finally {
+      jobs = await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+    expect(jobs).toHaveLength(2)
+    expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short /.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job error host=www\.youtube\.com .*lane=short .* mb=3 /.test(l))).toHaveLength(1)
+    expect(new Set(seen.map(([v]) => v))).toEqual(new Set(['linger1', 'lingerbroken1']))
+    for (const [, log] of seen) expect(log).toBe('up\ndone\n')
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a long video's download goes on past the time a short one gets",
+  async () => {
+    // a minute of download time is 250 ms: 7.5 s for a short video, 11.25 s
+    // for a long one, and both of these take 9 s
+    const bot = start({ MINUTE_MS: '250' })
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'crawl1')
+      bot.link(2, 'crawllong1')
+      await bot.until(() => bot.videos().length === 1 && bot.statuses(1).some((s) => s.startsWith('😱')), 25_000)
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.videos().map((v) => v.chat)).toEqual([2])
+    expect(bot.statuses(1).map((s) => [...s][0])).toEqual(['⏬', '😱'])
+    expect(jobs).toHaveLength(2)
+    const dl = (line: string) => Number(/ dl=([\d.]+)/.exec(line)![1])
+    // the short one is stopped at its 7.5 s, with the 2 MB it had...
+    const short = jobs.find((l) => l.includes(' lane=short '))!
+    expect(short).toMatch(/^job timeout host=www\.youtube\.com .* dl=\d+\.\d mb=2 total=/)
+    expect(dl(short)).toBeGreaterThanOrEqual(7.5)
+    expect(dl(short)).toBeLessThan(9)
+    // ...while the long one downloads for longer and goes out
+    const long = jobs.find((l) => l.includes(' lane=long '))!
+    expect(long).toMatch(/^job ok host=www\.youtube\.com /)
+    expect(dl(long)).toBeGreaterThan(7.5)
+  },
+  40_000,
+)
+
+test.skipIf(skip)(
+  'bot: a page read again gets only the time the job has left',
+  async () => {
+    // a minute is 250 ms, so a long video's job has 11.25 s. long1 holds the
+    // long slot for about 3 s, by when expiredlong1's saved info is stale. Its
+    // download from that info fails after 4 s, and the page read again takes
+    // 9 s: in the 7.25 s left that times out, where 11.25 s more would finish
+    const bot = start({ MINUTE_MS: '250' })
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'long1')
+      await bot.until(() => bot.statuses(1).length > 0)
+      bot.link(2, 'expiredlong1')
+      await bot.until(() => bot.statuses(2).some((s) => s.startsWith('😱')), 30_000)
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.videos().map((v) => v.chat)).toEqual([1])
+    const line = jobs.find((l) => l.includes(' reread=1'))!
+    expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=long .* mb=2 total=/)
+    // the job's 11.25 s in all, not 4 s and then another 11.25
+    const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
+    expect(dl).toBeGreaterThanOrEqual(11.25)
+    expect(dl).toBeLessThan(13)
+  },
+  45_000,
 )
