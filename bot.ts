@@ -500,6 +500,63 @@ export const stale = (age: number) => age > MINUTE
 // (none is, after a timeout)
 export const reread = (age: number, left: number) => stale(age) && left > MINUTE
 
+// Whether the page read again picks the file(s) the failed try got part of.
+// yt-dlp's --continue goes on from whatever file has the name it's about to
+// write, a .part by its bytes (an HTTP Range request) and a .ytdl by its
+// fragment index, without asking which format that came from, and one
+// format's name is the extension alone (v.mp4.part): another format's bytes
+// or fragments would be appended to the first one's. The same pick is of the
+// same video (a multi-video post's first one may change) and has formats with
+// the same ids and encodings: yt-dlp numbers the formats a site gives no id
+// of their own (0, 1, … in its order, hls-N), so an id alone could name
+// another file. Each format also has the same exact size, or where yt-dlp
+// doesn't know it, the same link. On a site yt-dlp has an extractor for,
+// that's up to the query, where signatures that change with every read
+// usually go: the video's id is the site's, and its format ids and encodings
+// tell its files apart. A page it reads with its generic extractor (GENERIC)
+// is another matter: the id comes from the page's address, and a <video>
+// there has a format with nothing but its index, ext and protocol, so its
+// whole link is all that tells another clip apart, the query too (a page may
+// pick its clip by it: /stream?clip=…). A link whose host or path changes
+// between the reads (a CDN that answers from another server, a signature in
+// the path), or on a generic page its query, starts over: safe, but slower.
+// A link that stays the same while the file behind it changes can't be told.
+const ENCODING = ['format_id', 'ext', 'protocol', 'width', 'height', 'tbr', 'vcodec', 'acodec']
+// yt-dlp's generic extractor and the embeds it finds on pages, whose video id
+// isn't a site's own: it's the page's (the HTML5 and quoted-HTML ones, by
+// _generic_id), the file's name without its extension and query (WordPress
+// players, Camtasia) or a page widget's (Elementor), and their formats may
+// have nothing but a link (yt-dlp 2026.08.19)
+const GENERIC =
+  /^(Generic|HTML5MediaEmbed|QuotedHTML|ElementorEmbed|WordpressPlaylistEmbed|WordpressMiniAudioPlayerEmbed|CamtasiaEmbed)$/
+// a link without its #fragment, and its query unless whole
+const link = (url: unknown, whole: boolean) =>
+  typeof url === 'string' ? url.split(whole ? '#' : /[?#]/)[0] : null
+const files = (v: any) => {
+  const whole = GENERIC.test(v.extractor_key)
+  return [
+    v.extractor_key,
+    v.id,
+    (v.requested_formats ?? [v]).map((f: any) => [
+      ...ENCODING.map((k) => f[k] ?? null),
+      f.filesize || link(f.url, whole),
+    ]),
+  ]
+}
+// Whether yt-dlp downloads a pick from its saved info: a video, not a
+// playlist (one a multi-video post's -J may have as its first entry)
+const isVideo = (v: any) => (v._type ?? 'video') === 'video'
+// What a download from saved info gets: the video picked, alone. yt-dlp loads
+// saved info without its entries (--clean-info-json), so from a multi-video
+// post's -J (a playlist of its first video, --playlist-items 1) it would have
+// nothing to download but the page, which it reads again itself and goes on
+// in, --continue, from whatever that picks. A pick that's a playlist goes as
+// -J printed it (json): its page is read again either way.
+export const saved = (v: any, json: string) => (isVideo(v) ? JSON.stringify(v) : json)
+// so the same pick is a video, judged as it's downloaded
+export const samePick = (a: any, b: any) =>
+  isVideo(a) && isVideo(b) && JSON.stringify(files(a)) === JSON.stringify(files(b))
+
 // The slots for downloading and sending videos. Long ones (20-40 min each on
 // some sites) take at most MAX_DOWNLOADS - 1 of them (with one slot, that
 // one), so long downloads never hold every slot; one user's get one fewer
@@ -803,6 +860,11 @@ export async function onDisk(dir: string) {
 export const biggest = async (dir: string) =>
   (await media(dir)).reduce((max, f) => Math.max(max, f.bytes), 0)
 
+// Deletes the media in a job's dir: whatever a failed download left
+export async function drop(dir: string) {
+  for (const f of await media(dir)) await rm(join(dir, f.name), { recursive: true, force: true })
+}
+
 // How a job that threw e ends in the job log: fail:<what the chat was told>,
 // timeout (the download ran out of time) or error
 export const outcome = (e: unknown) =>
@@ -1014,7 +1076,7 @@ function main() {
         args = [...YTDLP, ...(await jar(dir))]
 
       await status('downloading')
-      await Bun.write(join(dir, 'info.json'), json)
+      await Bun.write(join(dir, 'info.json'), saved(v, json))
       // yt-dlp holds a download to --max-filesize only by its Content-Length,
       // so an HLS or DASH one of unknown size (a stream recording) would grow
       // until the time limit, many GB into TMP. Every 5 s the job's files are
@@ -1044,6 +1106,22 @@ function main() {
       const fetched = Date.now()
       const age = fetched - extracted
       const budget = downloadMinutes(long) * MINUTE
+      // The page read again in left ms, then downloaded from like the first
+      // time. It's read apart from the download to see what it picks: the
+      // failed try's files are left to resume only for the same pick, and
+      // deleted first for another (samePick). --no-continue would be no way
+      // out: a fragment download (HLS, DASH) starts over then, but appended
+      // to a .part with bytes in it, which yt-dlp has opened in append mode.
+      const again = async (left: number) => {
+        const reading = Date.now()
+        const page = (await ytdlp([...args, '-J', url], left)).out
+        const pick = picked(JSON.parse(page))
+        const same = samePick(v, pick)
+        log[same ? 'kept' : 'dropped'] = await onDisk(dir)
+        if (!same) await drop(dir)
+        await Bun.write(join(dir, 'info.json'), saved(pick, page))
+        return grab(['--load-info-json', join(dir, 'info.json')], left - (Date.now() - reading))
+      }
       const { out, err } = await grab(
         [
           '--load-info-json', join(dir, 'info.json'),
@@ -1059,7 +1137,7 @@ function main() {
           const left = budget - (Date.now() - fetched)
           if (!reread(age, left)) throw e
           log.reread = 1
-          return grab([url], left)
+          return again(left)
         })
         .catch(async (e) => {
           // how far a failed download got, for the site's speed

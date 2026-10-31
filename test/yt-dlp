@@ -3,13 +3,29 @@
 // "long" in it is a 50-minute video, one with "slow" takes 3 s to describe,
 // one with "fail" is unavailable, one with "tweet" is a tweet without a video,
 // one with "reel" in it is an Instagram reel and one with "stream" in it a
-// stream, neither saying how long it is; the video's id is the v= parameter),
-// a download copies FAKE_MP4 after a while
+// stream, neither saying how long it is; the video's id is the v= parameter,
+// the format it picks "a", or "b" for one with "swap" in it when the page has
+// been read before, or with "flip" in it from the page's 4th read on, by a -J
+// or a download from the page itself, as listed in $PAGES/<id>; the format's
+// link, signed anew in its query on every read, ends in its letter, and its
+// id is that letter too; one with "embed" in it is a generic page's <video>
+// as yt-dlp tells one, a format "0" that says nothing else, whose link picks
+// the clip by its query, clip=<letter>; one with "multi" in it is a post with
+// several videos, a playlist of its first one, as -J --playlist-items 1 tells
+// it, whose saved info a download reads the page again from, as yt-dlp does
+// with no entries to download (it drops them from saved info); one with
+// "stuck" in it takes 30 s to describe when the page has been read before), a
+// download copies FAKE_MP4 after a while
 // (one with "crawl" in it takes 9 s, with 2 MB of it on disk meanwhile; one
 // with "broken" in it stops partway, 3 MB in; one with "huge" in it stops 3 MB
 // in without a word, as at --max-filesize; one with "expired" in it fails after
-// 4 s from saved info, as an expired media link would, and crawls from the
-// page; one with "linger" in it first leaves a process in its group that
+// 4 s the first time in a job's dir, from the saved info, as an expired media
+// link would, and crawls the next time, from the page read again; one with
+// "cut" in it writes 5 MB of its format's letter instead, but the first time
+// in a job's dir fails 3 MB in (2 MB with "swap" in it), and goes on from the
+// bytes a v.mp4.part already has whatever format they are, as yt-dlp's
+// --continue does, noted in $PAGES/<id>; one with "linger" in it first
+// leaves a process in its group that
 // doesn't hold its output and outlives it by 15 s, writing "up", then "done"
 // or "TERM" if it got SIGTERM, to $LINGER/<id>.<its pid>, or with "deaf" in it
 // too one that ignores SIGTERM and lives 10 s; one with "ffmpeg" in it, 2 MB
@@ -27,16 +43,27 @@
 // "parts" in it has a merge on disk for 1 s, 1900 and 100 MB parts and their
 // 2000 MB merged copy, v.temp.mp4 at first and v.mp4 from 0.5 s on, as a
 // merge renames it before the parts go)
-import { copyFileSync, readFileSync, renameSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const args = process.argv.slice(2)
 if (args.includes('--update-to') || args.includes('--list-extractors')) process.exit(0)
 const info = args.indexOf('--load-info-json')
-const url: string =
-  info >= 0
-    ? JSON.parse(readFileSync(args[info + 1]!, 'utf8')).webpage_url
-    : args.findLast((a) => a.startsWith('https://'))!
+const loaded = info >= 0 ? JSON.parse(readFileSync(args[info + 1]!, 'utf8')) : undefined
+// a playlist's saved info has nothing to download but its page
+const saved = loaded?._type === 'playlist' ? undefined : loaded
+const url: string = loaded ? loaded.webpage_url : args.findLast((a) => a.startsWith('https://'))!
+const id = new URL(url).searchParams.get('v')!
 const long = url.includes('long')
 const reel = url.includes('reel')
 const lengthless = reel || url.includes('stream')
@@ -48,29 +75,73 @@ if (args.includes('-J') && url.includes('tweet')) {
   console.error('ERROR: [twitter] 123: No video could be found in this tweet')
   process.exit(1)
 }
-const expired = url.includes('expired')
-const crawl = url.includes('crawl') || (expired && info < 0)
+const pages = process.env.PAGES
+const log = pages ? join(pages, id) : undefined
+// how many times the page has been read before
+const reads = log && existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter((l) => l === 'read').length : 0
+const before = reads > 0
+// The page read: the letter of the format it picks
+function read() {
+  if (log) appendFileSync(log, 'read\n')
+  return (url.includes('swap') && before) || (url.includes('flip') && reads >= 3) ? 'b' : 'a'
+}
 if (args.includes('-J') && url.includes('slow')) await Bun.sleep(3000)
-if (args.includes('-J'))
+if (args.includes('-J') && url.includes('stuck') && before) await Bun.sleep(30_000)
+if (args.includes('-J')) {
+  const letter = read()
+  const embed = url.includes('embed')
+  const multi = url.includes('multi')
+  const video = {
+    id,
+    extractor_key: embed ? 'HTML5MediaEmbed' : reel ? 'Instagram' : multi ? 'Twitter' : 'Youtube',
+    title: 'Video',
+    webpage_url: url,
+    format_id: embed ? '0' : letter,
+    url: embed
+      ? `https://media.example/${id}/video.mp4?clip=${letter}`
+      : `https://media.example/${id}/${letter}.mp4?sig=${Math.random().toString(36).slice(2)}`,
+    ext: 'mp4',
+    protocol: 'https',
+    duration: lengthless ? undefined : long ? 3000 : 30,
+    ...(embed ? {} : { vcodec: 'h264', width: 320, height: 240 }),
+  }
   console.log(
-    JSON.stringify({
-      id: new URL(url).searchParams.get('v'),
-      extractor_key: reel ? 'Instagram' : 'Youtube',
-      title: 'Video',
-      webpage_url: url,
-      duration: lengthless ? undefined : long ? 3000 : 30,
-      vcodec: 'h264',
-      width: 320,
-      height: 240,
-    }),
+    JSON.stringify(
+      multi
+        ? { _type: 'playlist', id, extractor_key: embed ? 'Generic' : 'Twitter', title: 'Post', webpage_url: url, entries: [video] }
+        : video,
+    ),
   )
-else {
+} else {
   const out = args[args.indexOf('-o') + 1]!.replace('%(ext)s', 'mp4')
-  if (expired && info >= 0) {
+  // the job's first download leaves a mark in its dir
+  const mark = join(dirname(out), 'fake-tried')
+  const first = !existsSync(mark)
+  writeFileSync(mark, '')
+  const expired = url.includes('expired')
+  if (expired && first) {
     await Bun.sleep(4000)
     console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden')
     process.exit(1)
   }
+  if (url.includes('cut')) {
+    // the format's letter: the clip its link picks, or its file's name
+    const media = saved && new URL(saved.url)
+    const letter = (media ? (media.searchParams.get('clip') ?? media.pathname.split('/').pop()![0]!) : read()).charCodeAt(0)
+    const part = `${out}.part`
+    if (first) {
+      writeFileSync(part, new Uint8Array((url.includes('swap') ? 2 : 3) * 2 ** 20).fill(letter))
+      console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden')
+      process.exit(1)
+    }
+    const have = existsSync(part) ? statSync(part).size : 0
+    if (have && pages) appendFileSync(join(pages, id), `resumed ${have}\n`)
+    appendFileSync(part, new Uint8Array(5 * 2 ** 20 - have).fill(letter))
+    renameSync(part, out)
+    console.log(out)
+    process.exit(0)
+  }
+  const crawl = url.includes('crawl') || (expired && !first)
   if (url.includes('linger')) {
     const deaf = url.includes('deaf')
     const trap = deaf ? "trap '' TERM" : `trap 'echo TERM >> "$log"; exit' TERM`

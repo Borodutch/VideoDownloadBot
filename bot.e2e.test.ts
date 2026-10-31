@@ -13,7 +13,7 @@ import { t } from './i18n'
 // MAX_DOWNLOADS=2: one slot for long videos, the other for short ones. env
 // adds to or overrides the bot's environment, delay = how long the fake Bot
 // API takes to answer a call, in ms.
-type Call = { method: string; chat: number; text?: string; upload?: boolean; inline?: string }
+type Call = { method: string; chat: number; text?: string; upload?: boolean; inline?: string; file?: Uint8Array }
 function start(env: Record<string, string> = {}, delay: (call: Call) => number = () => 0) {
   const work = mkdtempSync(join(tmpdir(), 'bot-e2e-'))
   const mp4 = join(work, 'v.mp4')
@@ -40,13 +40,18 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
         if (!next.length) await Bun.sleep(100)
         return ok(next)
       }
-      // inline = the guest reply an edit is to
+      // inline = the guest reply an edit is to, file = the bytes uploaded
+      // (grammY sends a file as attach://<the field it's in>)
+      const media = [body.video, body.audio]
+        .map((x) => (typeof x === 'string' && x.startsWith('attach://') ? body[x.slice(9)] : x))
+        .find((x) => x instanceof Blob)
       const call = {
         method,
         chat: chat.id,
         text: body.text,
         upload: type.includes('multipart'),
         inline: body.inline_message_id,
+        file: media && new Uint8Array(await media.arrayBuffer()),
       }
       calls.push(call)
       const ms = delay(call)
@@ -864,27 +869,121 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   'bot: a page read again gets only the time the job has left',
   async () => {
-    // a minute is 250 ms, so a long video's job has 11.25 s. long1 holds the
-    // long slot for about 3 s, by when expiredlong1's saved info is stale. Its
-    // download from that info fails after 4 s, and the page read again takes
-    // 9 s: in the 7.25 s left that times out, where 11.25 s more would finish
-    const bot = start({ MINUTE_MS: '250' })
+    // a minute is 250 ms, so a long video's job has 11.25 s, and
+    // "Downloading…" takes 500 ms to show, by when slowexpiredlong1's saved
+    // info is stale. Its download from that info fails after 4 s, then the
+    // page is read again (3 s, "slow") and downloaded from (9 s): in the 4.25
+    // s left that times out, where the 7.25 s left before the read would
+    // still end later
+    const bot = start({ MINUTE_MS: '250' }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
     let jobs: string[] = []
     try {
-      bot.link(1, 'long1')
-      await bot.until(() => bot.statuses(1).length > 0)
-      bot.link(2, 'expiredlong1')
-      await bot.until(() => bot.statuses(2).some((s) => s.startsWith('😱')), 30_000)
+      bot.link(1, 'slowexpiredlong1')
+      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('😱')), 30_000)
     } finally {
       jobs = await bot.stop()
     }
-    expect(bot.videos().map((v) => v.chat)).toEqual([1])
-    const line = jobs.find((l) => l.includes(' reread=1'))!
-    expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=long .* mb=2 total=/)
-    // the job's 11.25 s in all, not 4 s and then another 11.25
+    expect(bot.videos()).toHaveLength(0)
+    expect(jobs).toHaveLength(1)
+    const line = jobs[0]!
+    // the same pick, though the try from saved info got nothing
+    expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=long .* reread=1 kept=0 dl=\d+\.\d mb=2 total=/)
+    // the job's 11.25 s in all, not 4 s and then another 11.25, nor 4 s, the
+    // read again and 7.25 s
     const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
     expect(dl).toBeGreaterThanOrEqual(11.25)
     expect(dl).toBeLessThan(13)
+  },
+  45_000,
+)
+
+test.skipIf(skip)(
+  'bot: a page read again goes on from the failed download only in the format that got it',
+  async () => {
+    // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
+    // info is stale by the download. These links' downloads from it fail 3
+    // MB into a 5 MB file (2 MB for the swap ones), and their pages are read
+    // again. cut1's picks the same format, its link signed anew in the
+    // query, and goes on from those 3 MB; cutswap1's picks another, whose
+    // bytes yt-dlp would append to them. cutembed1 and cutswapembed1 are
+    // generic pages with a <video>, where only the link tells two clips
+    // apart: cutembed1's has the same clip and goes on, cutswapembed1's picks
+    // another one by the query. cutflipmulti1 and cutswapmulti1 are posts
+    // with several videos, whose -J is a playlist of the first one, and a
+    // download from that would read the page again itself: cutflipmulti1's
+    // first video is the same when it's read again, and another from the 4th
+    // read on, so a download that read it would append that one to the 3 MB;
+    // cutswapmulti1's picks another
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const bot = start({ MINUTE_MS: '250', PAGES: pages }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
+    let jobs: string[] = []
+    const links = ['cut1', 'cutswap1', 'cutembed1', 'cutswapembed1', 'cutflipmulti1', 'cutswapmulti1']
+    const read: Record<string, string> = {}
+    try {
+      links.forEach((v, i) => bot.link(i + 1, v))
+      await bot.until(() => bot.videos().length === links.length)
+      for (const v of links) read[v] = readFileSync(join(pages, v), 'utf8')
+    } finally {
+      jobs = await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+    }
+    // what a file is made of: [letter, bytes] for each run of one letter
+    const runs = (file: Uint8Array) => {
+      const all: [string, number][] = []
+      for (const b of file) {
+        const last = all.at(-1)
+        if (last?.[0] === String.fromCharCode(b)) last[1]++
+        else all.push([String.fromCharCode(b), 1])
+      }
+      return all
+    }
+    const sent = (chat: number) => runs(bot.videos().find((c) => c.chat === chat)!.file!)
+    expect(links.map((_, i) => sent(i + 1))).toEqual(['a', 'b', 'a', 'b', 'a', 'b'].map((x) => [[x, 5 * 2 ** 20]]))
+    // the pages read by the -Js alone: the downloads were from what they
+    // picked, a post's first video too
+    expect(read).toEqual({
+      cut1: 'read\nread\nresumed 3145728\n',
+      cutswap1: 'read\nread\n',
+      cutembed1: 'read\nread\nresumed 3145728\n',
+      cutswapembed1: 'read\nread\n',
+      cutflipmulti1: 'read\nread\nresumed 3145728\n',
+      cutswapmulti1: 'read\nread\n',
+    })
+    // kept for the links that went on from 3 MB, dropped for the swap ones' 2
+    expect(jobs).toHaveLength(6)
+    expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* reread=1 kept=3 dl=\d+\.\d mb=5 /.test(l))).toHaveLength(3)
+    expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* reread=1 dropped=2 dl=\d+\.\d mb=5 /.test(l))).toHaveLength(3)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a page read again that doesn't answer in the time the job has left stops with it",
+  async () => {
+    // a minute is 250 ms, so a short video's job has 7.5 s, and
+    // "Downloading…" takes 500 ms to show, by when stuckexpired1's saved info
+    // is stale. Its download from that info fails after 4 s, then the page is
+    // read again, which takes 30 s: that's stopped in the 3.5 s left, rather
+    // than hold the slot for as long as yt-dlp takes
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const bot = start({ MINUTE_MS: '250', PAGES: pages }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'stuckexpired1')
+      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('😱')), 20_000)
+    } finally {
+      jobs = await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+    }
+    expect(bot.videos()).toHaveLength(0)
+    expect(jobs).toHaveLength(1)
+    const line = jobs[0]!
+    // stopped while reading the page: nothing picked, kept or dropped
+    expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=short .* reread=1 dl=\d+\.\d mb=0 total=/)
+    // the job's 7.5 s in all
+    const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
+    expect(dl).toBeGreaterThanOrEqual(7.5)
+    expect(dl).toBeLessThan(9.25)
   },
   45_000,
 )

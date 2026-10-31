@@ -8,6 +8,7 @@ import {
   biggest,
   claims,
   downloadMinutes,
+  drop,
   Fail,
   floodWait,
   fresh,
@@ -23,6 +24,8 @@ import {
   PROGRESS,
   requested,
   reread,
+  samePick,
+  saved,
   sender,
   shown,
   sizes,
@@ -607,6 +610,140 @@ test('reread: a failed download reads the page again only from info over a minut
   expect(reread(5 * 60_000, 50_000)).toBe(false)
   // the same age makes a download from saved info stop at a missing fragment
   expect([stale(30_000), stale(5 * 60_000)]).toEqual([false, true])
+})
+
+test('samePick: a page read again picks what the failed download got part of only for the same video, format ids, encodings, and sizes or else links', () => {
+  // one format of a site yt-dlp has an extractor for, as its -J describes the
+  // pick: its links are signed anew in the query on every read of the page,
+  // the rest doesn't change
+  const one = {
+    extractor_key: 'Dailymotion',
+    id: 'clip',
+    format_id: 'hls-1080p',
+    ext: 'mp4',
+    protocol: 'm3u8_native',
+    width: 1920,
+    height: 1080,
+    tbr: 4000,
+    vcodec: 'avc1.640028',
+    acodec: 'mp4a.40.2',
+    filesize: null,
+    url: 'https://cdn/1080.m3u8?token=1',
+    title: 'Clip',
+  }
+  expect(samePick(one, { ...one, url: 'https://cdn/1080.m3u8?token=2', title: 'Clip (edited)' })).toBe(true)
+  expect(samePick(one, { ...one, format_id: 'hls-720p' })).toBe(false)
+  // where yt-dlp doesn't know the size, another link is another file, and
+  // one from another host or signed in its path is taken for one too
+  for (const url of ['https://cdn/720.m3u8?token=1', 'https://cdn2/1080.m3u8?token=1', 'https://cdn/exp=2~hmac=f00/1080.m3u8'])
+    expect(samePick(one, { ...one, url })).toBe(false)
+  // another video with the same formats: a multi-video post whose first one
+  // changed
+  expect(samePick(one, { ...one, id: 'other' })).toBe(false)
+  expect(samePick(one, { ...one, extractor_key: 'Vimeo' })).toBe(false)
+  // yt-dlp numbers formats without an id of their own by their order, so the
+  // same id can be another file: another size in pixels, bitrate, codec,
+  // protocol or container
+  const numbered = { ...one, format_id: '0' }
+  for (const [k, x] of [['height', 720], ['width', 1280], ['tbr', 2500], ['vcodec', 'vp9'], ['acodec', 'opus'], ['protocol', 'https'], ['ext', 'webm']] as const)
+    expect(samePick(numbered, { ...numbered, [k]: x })).toBe(false)
+  // the same id, but another file: a size yt-dlp knows differs, or only one
+  // read of the page says it
+  const sized = { ...numbered, filesize: 5_000_000 }
+  expect(samePick(sized, { ...sized })).toBe(true)
+  expect(samePick(sized, { ...sized, filesize: 7_000_000 })).toBe(false)
+  expect(samePick(sized, { ...sized, filesize: null })).toBe(false)
+  // an exact size tells the file, wherever its link points now
+  expect(samePick(sized, { ...sized, url: 'https://cdn2/exp=2~hmac=f00/1080.m3u8' })).toBe(true)
+  // a generic page's <video>, as yt-dlp 2026.08.19 told one: an id from the
+  // page's address and a format with nothing but its index, ext and protocol,
+  // so after the page swapped its clip only the link says it's another, and
+  // the query may be all of the link that changed (Astra's real repros)
+  const embed = (clip: string, extractor_key = 'HTML5MediaEmbed') => ({
+    extractor_key,
+    id: 'page-1',
+    webpage_url: 'http://127.0.0.1:53791/clip/page.html',
+    format_id: '0',
+    ext: 'mp4',
+    protocol: 'http',
+    url: `http://127.0.0.1:53791/clip/${clip}`,
+    width: null,
+    height: null,
+    tbr: null,
+    vcodec: null,
+    acodec: null,
+    filesize: null,
+    filesize_approx: null,
+  })
+  for (const [a, b] of [['a.mp4', 'b.mp4'], ['stream?clip=a', 'stream?clip=b'], ['clip.mp4?v=1', 'clip.mp4?v=2']])
+    for (const key of ['HTML5MediaEmbed', 'Generic', 'QuotedHTML', 'ElementorEmbed', 'WordpressPlaylistEmbed', 'WordpressMiniAudioPlayerEmbed', 'CamtasiaEmbed']) {
+      expect(samePick(embed(a, key), embed(b, key))).toBe(false)
+      expect(samePick(embed(a, key), embed(`${a}#t=1`, key))).toBe(true)
+    }
+  // merged video and audio: both parts, in order
+  const merged = {
+    extractor_key: 'Youtube',
+    id: 'dQw4w9WgXcQ',
+    format_id: '137+140',
+    requested_formats: [
+      { format_id: '137', ext: 'mp4', vcodec: 'avc1.640028', acodec: 'none', height: 1080, filesize: 300 },
+      { format_id: '140', ext: 'm4a', vcodec: 'none', acodec: 'mp4a.40.2', filesize: 20 },
+    ],
+  }
+  expect(samePick(merged, structuredClone(merged))).toBe(true)
+  expect(samePick(merged, { ...merged, requested_formats: [merged.requested_formats[0], { ...merged.requested_formats[1], format_id: '251' }] })).toBe(false)
+  expect(samePick(merged, { ...merged, requested_formats: [...merged.requested_formats].reverse() })).toBe(false)
+  expect(samePick(merged, { ...merged, requested_formats: undefined, ...merged.requested_formats[0] })).toBe(false)
+  // a pick that's a playlist (a post's -J may have one as its first entry)
+  // isn't what a download from saved info gets: yt-dlp reads its page again,
+  // and picks what it picks then, so it's never the same, even as itself
+  const inner = { _type: 'playlist', extractor_key: 'YoutubeTab', id: 'PL1', webpage_url: 'https://www.youtube.com/playlist?list=PL1', entries: [one] }
+  expect(samePick(inner, structuredClone(inner))).toBe(false)
+  expect(samePick(one, inner)).toBe(false)
+  expect(samePick(one, { ...one, _type: 'video' })).toBe(true)
+})
+
+test('saved: a download from saved info gets the video picked alone, not the multi-video post it is the first of', () => {
+  // a page with two <video>s, as yt-dlp 2026.08.19's -J --playlist-items 1
+  // told it: a playlist of its first one, whose entries yt-dlp would drop from
+  // saved info (Astra's real repro)
+  const entry = {
+    id: 'page-1',
+    title: 'Page (1)',
+    extractor_key: 'HTML5MediaEmbed',
+    format_id: '0',
+    ext: 'mp4',
+    protocol: 'http',
+    url: 'http://127.0.0.1:53977/clip/a.mp4',
+    webpage_url: 'http://127.0.0.1:53977/page.html',
+    playlist_index: 1,
+  }
+  const post = { _type: 'playlist', id: 'page', title: 'Page', extractor_key: 'Generic', webpage_url: 'http://127.0.0.1:53977/page.html', playlist_count: 2, entries: [entry] }
+  expect(JSON.parse(saved(picked(post), JSON.stringify(post)))).toEqual(entry)
+  // a video alone: what -J printed
+  const video = { id: 'v', extractor_key: 'Youtube', format_id: '18', url: 'https://cdn/v.mp4?sig=1' }
+  expect(JSON.parse(saved(picked(video), JSON.stringify(video)))).toEqual(video)
+  // a playlist in the post's: its page is read again however it's saved, so
+  // it goes as -J printed it
+  const nested = { ...post, entries: [{ _type: 'playlist', id: 'inner', extractor_key: 'Generic', entries: [entry] }] }
+  expect(saved(picked(nested), JSON.stringify(nested))).toBe(JSON.stringify(nested))
+})
+
+test('drop: deletes the media a failed download left in a job dir, nothing else', async () => {
+  const { mkdtemp, readdir, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'job-'))
+  try {
+    for (const f of ['v.mp4.part', 'v.mp4.ytdl', 'v.mp4.part-Frag3.part', 'v.f137.mp4', 'v.temp.mp4', 'info.json', 'cookies.txt'])
+      await writeFile(join(dir, f), 'x')
+    await drop(dir)
+    expect((await readdir(dir)).sort()).toEqual(['cookies.txt', 'info.json'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+  // a dir that's gone already
+  await drop(dir)
 })
 
 test('downloadMinutes: a long video may download for 45 minutes, a short one for 30', () => {
