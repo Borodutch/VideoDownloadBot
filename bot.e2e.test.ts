@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite'
 import { expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,7 +14,18 @@ import { t } from './i18n'
 // MAX_DOWNLOADS=2: one slot for long videos, the other for short ones. env
 // adds to or overrides the bot's environment, delay = how long the fake Bot
 // API takes to answer a call, in ms.
-type Call = { method: string; chat: number; text?: string; upload?: boolean; inline?: string; file?: Uint8Array }
+type Call = {
+  method: string
+  chat: number
+  text?: string
+  upload?: boolean
+  inline?: string
+  file?: Uint8Array
+  caption?: string
+  title?: string
+  performer?: string
+  duration?: number
+}
 function start(env: Record<string, string> = {}, delay: (call: Call) => number = () => 0) {
   const work = mkdtempSync(join(tmpdir(), 'bot-e2e-'))
   const mp4 = join(work, 'v.mp4')
@@ -41,7 +53,8 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
         return ok(next)
       }
       // inline = the guest reply an edit is to, file = the bytes uploaded
-      // (grammY sends a file as attach://<the field it's in>)
+      // (grammY sends a file as attach://<the field it's in>), title,
+      // performer and duration as a video or audio file was sent with
       const media = [body.video, body.audio]
         .map((x) => (typeof x === 'string' && x.startsWith('attach://') ? body[x.slice(9)] : x))
         .find((x) => x instanceof Blob)
@@ -52,19 +65,31 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
         upload: type.includes('multipart'),
         inline: body.inline_message_id,
         file: media && new Uint8Array(await media.arrayBuffer()),
+        caption: body.caption,
+        title: body.title,
+        performer: body.performer,
+        duration: body.duration === undefined ? undefined : Number(body.duration),
       }
       calls.push(call)
       const ms = delay(call)
       if (ms) await Bun.sleep(ms)
       if (method === 'answerGuestQuery') return ok({ inline_message_id: `g${++id}` })
       if (method === 'sendMessage') return ok({ message_id: ++id, date: 0, chat, text: body.text })
+      // cached file_ids "unsized…" went out without a size, as before #281
       if (method === 'sendVideo')
         return ok({
           message_id: ++id,
           date: 0,
           chat,
-          video: { file_id: `v${id}`, file_unique_id: `u${id}`, width: 320, height: 240, duration: 1 },
+          video: {
+            file_id: `v${id}`,
+            file_unique_id: `u${id}`,
+            ...(String(body.video).startsWith('unsized') ? {} : { width: 320, height: 240 }),
+            duration: 1,
+          },
         })
+      if (method === 'sendAudio')
+        return ok({ message_id: ++id, date: 0, chat, audio: { file_id: `a${id}`, file_unique_id: `u${id}`, duration: 1 } })
       return ok(true)
     },
   })
@@ -105,6 +130,8 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
   }
   return {
     calls,
+    // FAKE_MP4's bytes, which a download copies
+    mp4: readFileSync(mp4),
     // in a private chat
     link(user: number, v: string) {
       updates.push({ update_id: updates.length + 1, message: message(user, v) } as { update_id: number })
@@ -986,4 +1013,201 @@ test.skipIf(skip)(
     expect(dl).toBeLessThan(9.25)
   },
   45_000,
+)
+
+// The sent videos and audio files
+const files = (calls: Call[]) => calls.filter((c) => /^send(Video|Audio)$/.test(c.method))
+
+test.skipIf(skip)(
+  "bot: a page read again that picks another video sends that one as itself, cached under its own id, not the first one's",
+  async () => {
+    // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
+    // info is stale by the download. old1's download from it fails 3 MB in,
+    // and its page, read again, now shows another video, new1: 40 s of audio
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const bot = start({ MINUTE_MS: '250', PAGES: pages }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'old1&cut&next=new1')
+      // its status goes once the job is over
+      await bot.until(() => bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage'))
+      // new1 by its own link, old1 by another one, and old4, whose page read
+      // again shows new1 too
+      bot.link(2, 'new1')
+      bot.link(3, 'old1')
+      bot.link(4, 'old4&cut&next=new1')
+      await bot.until(
+        () => files(bot.calls).length === 4 && [3, 4].every((chat) => bot.calls.some((c) => c.chat === chat && c.method === 'deleteMessage')),
+      )
+      // then old4 by another link
+      bot.link(5, 'old4')
+      await bot.until(() => files(bot.calls).length === 5)
+    } finally {
+      jobs = await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+    }
+    // new1's copy went to its own link and to old4's from the cache; old1 and
+    // old4 have none cached, so they were downloaded
+    expect(files(bot.calls).map((c) => [c.chat, c.method, c.upload]).sort()).toEqual([
+      [1, 'sendAudio', true],
+      [2, 'sendAudio', false],
+      [3, 'sendVideo', true],
+      [4, 'sendAudio', false],
+      [5, 'sendVideo', true],
+    ])
+    const sent = files(bot.calls).find((c) => c.chat === 1)!
+    expect([sent.title, sent.performer, sent.duration]).toEqual(['Next', 'Someone', 40])
+    expect(sent.caption).toStartWith('<a href="https://www.youtube.com/watch?v=new1">Next</a>')
+    // new1's download, not old1's format (5 MB of "a")
+    expect(bot.mp4.equals(sent.file!)).toBe(true)
+    expect(jobs).toHaveLength(5)
+    expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* reread=1 dropped=3 other=1 dl=\d+\.\d mb=0 up=/.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job cached host=www\.youtube\.com .*lane=short .* reread=1 dropped=3 other=1 dl=\d+\.\d total=/.test(l))).toHaveLength(1)
+    // new1's own link, before any slot
+    expect(jobs.filter((l) => /^job cached host=www\.youtube\.com metaq=\S+ meta=\S+ total=/.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* dur=30 wait=\S+ dl=/.test(l))).toHaveLength(2)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a post with several videos whose first one has changed when read again sends the new one, downloaded from its own info, not the post's",
+  async () => {
+    // As above, with old1 a post with several videos, whose -J is a playlist
+    // of its first one: read again, that's new1. The download is from new1's
+    // own info, not the post's, from which yt-dlp would read the post again
+    // itself and download whatever it picks then
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const bot = start({ MINUTE_MS: '250', PAGES: pages }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
+    let jobs: string[] = []
+    let read = ''
+    try {
+      bot.link(1, 'old1&cut&multi&next=new1')
+      await bot.until(() => bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage'))
+      read = readFileSync(join(pages, 'old1'), 'utf8')
+      // new1 by its own link, and the post's old1 by another one
+      bot.link(2, 'new1')
+      bot.link(3, 'old1&multi')
+      await bot.until(() => files(bot.calls).length === 3)
+    } finally {
+      jobs = await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+    }
+    // the post read by the two -Js alone: the download didn't read it again
+    expect(read).toBe('read\nread\n')
+    // new1's copy went to its own link from the cache; old1 has none cached,
+    // so it was downloaded
+    expect(files(bot.calls).map((c) => [c.chat, c.method, c.upload]).sort()).toEqual([
+      [1, 'sendAudio', true],
+      [2, 'sendAudio', false],
+      [3, 'sendVideo', true],
+    ])
+    const sent = files(bot.calls).find((c) => c.chat === 1)!
+    expect([sent.title, sent.performer, sent.duration]).toEqual(['Next', 'Someone', 40])
+    // new1's download, not old1's format (5 MB of "a")
+    expect(bot.mp4.equals(sent.file!)).toBe(true)
+    expect(jobs).toHaveLength(3)
+    expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* reread=1 dropped=3 other=1 dl=\d+\.\d mb=0 up=/.test(l))).toHaveLength(1)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  'bot: a page read again that picks a live stream, or a video too big to send, says so',
+  async () => {
+    // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
+    // info is stale by the download. old1's and old2's downloads from it fail
+    // 3 MB in, and their pages, read again, now show another video: live1,
+    // live now, and big2, 3000 MB
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const bot = start({ MINUTE_MS: '250', PAGES: pages }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'old1&cut&next=live1')
+      bot.link(2, 'old2&cut&next=big2')
+      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).length === 2))
+    } finally {
+      jobs = await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+    }
+    expect(files(bot.calls)).toHaveLength(0)
+    expect(bot.statuses(1)).toEqual([t('en', 'downloading'), t('en', 'live')])
+    expect(bot.statuses(2)).toEqual([t('en', 'downloading'), t('en', 'tooBig')])
+    expect(jobs).toHaveLength(2)
+    for (const why of ['live', 'tooBig'])
+      expect(jobs.filter((l) => new RegExp(`^job fail:${why} host=www\\.youtube\\.com .* reread=1 dropped=3 other=1 dl=\\d+\\.\\d mb=0 total=`).test(l))).toHaveLength(1)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  'bot: a refresh of an unsized video goes on only while the page picks that video, at the first read or when read again',
+  async () => {
+    // old1, old2 and old3 have copies cached under their links and ids
+    // before videos went out with their size (#281), which the fake Bot API
+    // resends without one, so each is downloaded again to replace its copy.
+    // old2's page shows new2 at the first read already. old1's refresh waits
+    // for a slot behind the same user's long1 (3 s), so its -J info is stale
+    // by the download, which fails 3 MB in, and the page read again picks
+    // new1. old3's page still shows old3.
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    for (const [n, v] of [[1, 'old1&cut&next=new1'], [2, 'old2&next=new2'], [3, 'old3']] as const)
+      for (const key of [link(v), `Youtube:old${n}`])
+        db.run("INSERT INTO files VALUES (?, 'video', ?, 'Video', ?)", [key, `unsized${n}`, link(v)])
+    db.close()
+    writeFileSync(join(pages, 'old2'), 'read\n')
+    const bot = start({ MINUTE_MS: '250', PAGES: pages, DATA_DIR: data })
+    let jobs: string[] = []
+    let cached: Record<string, string> = {}
+    try {
+      bot.link(2, 'old2&next=new2')
+      bot.link(3, 'old3')
+      bot.link(1, 'long1')
+      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('⏬')))
+      bot.link(1, 'old1&cut&next=new1')
+      // once old1's refresh has read the page, short1 waits for the user's
+      // slot after it: by short1's upload that refresh is over
+      await bot.until(() => existsSync(join(pages, 'old1')))
+      bot.link(1, 'short1')
+      await bot.until(() => files(bot.calls).length === 6 && bot.calls.some((c) => c.chat === 3 && c.method === 'deleteMessage'))
+    } finally {
+      jobs = await bot.stop()
+      const db = new Database(join(data, 'bot.sqlite'))
+      const rows = db.query<{ key: string; file_id: string }, []>('SELECT key, file_id FROM files').all()
+      cached = Object.fromEntries(rows.map((r) => [r.key, r.file_id]))
+      db.close()
+      rmSync(pages, { recursive: true, force: true })
+      rmSync(data, { recursive: true, force: true })
+    }
+    const sent = (chat: number) => files(bot.calls).filter((c) => c.chat === chat).map((c) => [c.method, c.upload])
+    // old1 (with long1 and short1) and old2 get their old copies and nothing
+    // in their place; old3's is replaced: a new upload, the old message gone
+    expect(sent(1).sort()).toEqual([
+      ['sendVideo', false],
+      ['sendVideo', true],
+      ['sendVideo', true],
+    ])
+    expect(sent(2)).toEqual([['sendVideo', false]])
+    expect(sent(3)).toEqual([
+      ['sendVideo', false],
+      ['sendVideo', true],
+    ])
+    expect(bot.calls.filter((c) => c.method === 'deleteMessage' && c.chat !== 1).map((c) => c.chat)).toEqual([3])
+    for (const n of [1, 2]) {
+      expect(cached[`Youtube:old${n}`]).toBe(`unsized${n}`)
+      expect(cached[`Youtube:new${n}`]).toBeUndefined()
+    }
+    expect([cached[link('old1&cut&next=new1')], cached[link('old2&next=new2')]]).toEqual(['unsized1', 'unsized2'])
+    expect(cached['Youtube:old3']).toMatch(/^v\d+$/)
+    expect(cached[link('old3')]).toBe(cached['Youtube:old3'])
+    expect(jobs).toHaveLength(5)
+    expect(jobs.filter((l) => /^job fail:quiet host=www\.youtube\.com .*lane=short .* reread=1 dropped=3 other=1 dl=\d+\.\d mb=0 total=/.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job fail:quiet host=www\.youtube\.com metaq=\S+ meta=\S+ total=/.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* dur=30 wait=\S+ dl=/.test(l))).toHaveLength(2)
+  },
+  30_000,
 )

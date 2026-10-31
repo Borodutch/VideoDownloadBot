@@ -56,10 +56,18 @@ type Opts = Parameters<Context['api']['sendVideo']>[2] &
 // Where a file goes: a chat, replying to a message there, with a promo line
 // or button if the user's experiment arm has one (promo.ts); sent = the id
 // of the message that carried it; stale = a cached video that went out
-// without a size, being downloaded again to replace it; who = the user who
-// asked, whose jobs take turns with everyone else's (limit); uploading = its
-// own job has begun the upload
-type Dest = { chat: number | string; reply?: number; sent?: number; promo?: Promo; stale?: number; who?: number; uploading?: boolean }
+// without a size, being downloaded again to replace it: that message and
+// its file_id; who = the user who asked, whose jobs take turns with everyone
+// else's (limit); uploading = its own job has begun the upload
+type Dest = {
+  chat: number | string
+  reply?: number
+  sent?: number
+  promo?: Promo
+  stale?: { message: number; file_id: string }
+  who?: number
+  uploading?: boolean
+}
 // Guest replies can't upload, so their files go through this chat first
 // (the message is deleted right after, the file_id stays valid)
 const STORAGE = env.STORAGE_CHAT || env.ADMIN_ID
@@ -557,6 +565,9 @@ export const saved = (v: any, json: string) => (isVideo(v) ? JSON.stringify(v) :
 export const samePick = (a: any, b: any) =>
   isVideo(a) && isVideo(b) && JSON.stringify(files(a)) === JSON.stringify(files(b))
 
+// The key a video's file is cached under, whatever link led to it
+const cacheKey = (v: any) => `${v.extractor_key}:${v.id}`
+
 // The slots for downloading and sending videos. Long ones (20-40 min each on
 // some sites) take at most MAX_DOWNLOADS - 1 of them (with one slot, that
 // one), so long downloads never hold every slot; one user's get one fewer
@@ -1042,24 +1053,41 @@ function main() {
         throw new Fail(notVideo(why, ies) ? null : 'failed', why)
       }
       const extracted = Date.now()
-      const v = picked(JSON.parse(json))
-      const stream = unready(v)
-      if (stream) throw new Fail(stream, `${stream} stream`)
-      const id = `${v.extractor_key}:${v.id}`
+      // The video and the key it's cached under: the page read again may
+      // pick another one (again())
+      let v = picked(JSON.parse(json))
+      let id = cacheKey(v)
       // The video may be cached under another link, or get cached by another
       // job while this one waits; a refresh wants a new upload, not another
       // cached copy
-      const fromCache = async () => {
-        const hit = get.get(id)
+      const fromCache = async (key: string) => {
+        const hit = get.get(key)
         if (hit && !dest.stale && (await resend(dest, hit))) {
           put(url, hit)
           return hit
         }
       }
-      const hit = await fromCache()
+      // What a video the page picks goes through before it's downloaded: a
+      // stream yt-dlp can't download yet fails, a refresh stops quietly
+      // unless it's the video it replaces, a copy cached under its key goes
+      // out and is returned, and one yt-dlp says is too big fails. A
+      // refresh's download takes the old copy's place in the chat and under
+      // every key cached with it (swap), so it has to be the video whose key
+      // has that copy: the page may lead to another one now, at the first
+      // read or when read again (a multi-video post whose first one has
+      // changed), and the old copy stays.
+      const vet = async (pick: any) => {
+        const stream = unready(pick)
+        if (stream) throw new Fail(stream, `${stream} stream`)
+        if (dest.stale && get.get(cacheKey(pick))?.file_id !== dest.stale.file_id)
+          throw new Fail(null, 'another video')
+        const hit = await fromCache(cacheKey(pick))
+        if (hit) return hit
+        const size = sizes(pick).reduce<number>((all, n) => all + (n ?? 0), 0)
+        if (size > LIMIT) throw new Fail('tooBig')
+      }
+      const hit = await vet(v)
       if (hit) return hit
-      const size = sizes(v).reduce<number>((all, n) => all + (n ?? 0), 0)
-      if (size > LIMIT) throw new Fail('tooBig')
 
       const long = isLong(v)
       log.lane = long ? 'long' : 'short'
@@ -1069,7 +1097,7 @@ function main() {
       const waited = Date.now()
       free = await slots.take(dest.who, long)
       log.wait = elapsed(waited)
-      const sent = await fromCache()
+      const sent = await fromCache(id)
       if (sent) return sent
       // another run may have saved newer cookies while this one waited
       if (taken.has(dir) && (await stat(JAR)).mtimeMs !== taken.get(dir))
@@ -1112,6 +1140,12 @@ function main() {
       // deleted first for another (samePick). --no-continue would be no way
       // out: a fragment download (HLS, DASH) starts over then, but appended
       // to a .part with bytes in it, which yt-dlp has opened in append mode.
+      // Another video picked this time (a multi-video post whose first one
+      // has changed, or a link that leads to another one now) gets the
+      // checks the first one got (vet: a cached copy of it goes out instead
+      // of a download, and a refresh stops), then becomes the job's video:
+      // it goes out with its own title, length and kind, and is cached under
+      // its own key, never the first one's.
       const again = async (left: number) => {
         const reading = Date.now()
         const page = (await ytdlp([...args, '-J', url], left)).out
@@ -1119,10 +1153,17 @@ function main() {
         const same = samePick(v, pick)
         log[same ? 'kept' : 'dropped'] = await onDisk(dir)
         if (!same) await drop(dir)
+        if (cacheKey(pick) !== id) {
+          log.other = 1
+          const hit = await vet(pick)
+          if (hit) return hit
+          v = pick
+          id = cacheKey(pick)
+        }
         await Bun.write(join(dir, 'info.json'), saved(pick, page))
         return grab(['--load-info-json', join(dir, 'info.json')], left - (Date.now() - reading))
       }
-      const { out, err } = await grab(
+      const got = await grab(
         [
           '--load-info-json', join(dir, 'info.json'),
           // a fragment lost to an expired link fails it (and it reads the page
@@ -1147,6 +1188,9 @@ function main() {
         })
         .finally(() => clearInterval(weigh))
       log.dl = elapsed(fetched)
+      // the page read again picked another video, which went out from the cache
+      if ('file_id' in got) return got
+      const { out, err } = got
       const path = out.trim().split('\n').pop()
       // --print implies --quiet, so a file over --max-filesize is skipped
       // with exit 0 and no output at all
@@ -1219,7 +1263,7 @@ function main() {
     status: (key: Key, follow?: boolean) => Promise<void>,
   ): Promise<File> {
     const cached = get.get(url)
-    if (cached && (await resend(dest, cached, (id) => (dest.stale = id))))
+    if (cached && (await resend(dest, cached, (message) => (dest.stale = { message, file_id: cached.file_id }))))
       return dest.stale ? refresh(dest, url, cached) : cached
     const job = jobs.get(url)
     if (job) {
@@ -1271,7 +1315,7 @@ function main() {
     try {
       const f = await download(dest, url, async () => {})
       swap(old.file_id, f)
-      await bot.api.deleteMessage(dest.chat, dest.stale!).catch(() => {})
+      await bot.api.deleteMessage(dest.chat, dest.stale!.message).catch(() => {})
       return f
     } catch (e) {
       console.error('refresh failed', url, (e as Error).message)

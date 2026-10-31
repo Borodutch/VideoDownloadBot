@@ -14,8 +14,11 @@
 // several videos, a playlist of its first one, as -J --playlist-items 1 tells
 // it, whose saved info a download reads the page again from, as yt-dlp does
 // with no entries to download (it drops them from saved info); one with
-// "stuck" in it takes 30 s to describe when the page has been read before), a
-// download copies FAKE_MP4 after a while
+// "stuck" in it takes 30 s to describe when the page has been read before; a
+// page read before with next=<id> in its link picks another video instead (a
+// post's first one, with "multi"): 40 s of audio titled "Next", by
+// "Someone", at its own link with v=<id>, live now if <id> has "live" in it
+// and 3000 MB if "big"), a download copies FAKE_MP4 after a while
 // (one with "crawl" in it takes 9 s, with 2 MB of it on disk meanwhile; one
 // with "broken" in it stops partway, 3 MB in; one with "huge" in it stops 3 MB
 // in without a word, as at --max-filesize; one with "expired" in it fails after
@@ -87,6 +90,7 @@ function read() {
 }
 if (args.includes('-J') && url.includes('slow')) await Bun.sleep(3000)
 if (args.includes('-J') && url.includes('stuck') && before) await Bun.sleep(30_000)
+const next = new URL(url).searchParams.get('next')
 if (args.includes('-J')) {
   const letter = read()
   const embed = url.includes('embed')
@@ -105,11 +109,29 @@ if (args.includes('-J')) {
     duration: lengthless ? undefined : long ? 3000 : 30,
     ...(embed ? {} : { vcodec: 'h264', width: 320, height: 240 }),
   }
+  const shown =
+    next && before
+      ? {
+          id: next,
+          extractor_key: 'Youtube',
+          title: 'Next',
+          uploader: 'Someone',
+          webpage_url: `https://www.youtube.com/watch?v=${next}`,
+          format_id: 'a',
+          url: `https://media.example/${next}/a.m4a`,
+          ext: 'm4a',
+          protocol: 'https',
+          duration: 40,
+          vcodec: 'none',
+          live_status: next.includes('live') ? 'is_live' : 'not_live',
+          filesize: next.includes('big') ? 3000 * 2 ** 20 : undefined,
+        }
+      : video
   console.log(
     JSON.stringify(
       multi
-        ? { _type: 'playlist', id, extractor_key: embed ? 'Generic' : 'Twitter', title: 'Post', webpage_url: url, entries: [video] }
-        : video,
+        ? { _type: 'playlist', id, extractor_key: embed ? 'Generic' : 'Twitter', title: 'Post', webpage_url: url, entries: [shown] }
+        : shown,
     ),
   )
 } else {
