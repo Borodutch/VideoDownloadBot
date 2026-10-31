@@ -1,0 +1,44 @@
+#!/usr/bin/env bun
+// Stands in for yt-dlp in bot.e2e.test.ts: -J describes the link (one with
+// "long" in it is a 50-minute video, one with "slow" takes 3 s to describe,
+// one with "fail" is unavailable, one with "tweet" is a tweet without a
+// video; the video's id is the v= parameter), a download copies FAKE_MP4
+// after a while
+import { copyFileSync, readFileSync } from 'node:fs'
+
+const args = process.argv.slice(2)
+if (args.includes('--update-to') || args.includes('--list-extractors')) process.exit(0)
+const info = args.indexOf('--load-info-json')
+const url: string =
+  info >= 0
+    ? JSON.parse(readFileSync(args[info + 1]!, 'utf8')).webpage_url
+    : args.findLast((a) => a.startsWith('https://'))!
+const long = url.includes('long')
+if (args.includes('-J') && url.includes('fail')) {
+  console.error('ERROR: [youtube] x: Video unavailable')
+  process.exit(1)
+}
+if (args.includes('-J') && url.includes('tweet')) {
+  console.error('ERROR: [twitter] 123: No video could be found in this tweet')
+  process.exit(1)
+}
+if (args.includes('-J') && url.includes('slow')) await Bun.sleep(3000)
+if (args.includes('-J'))
+  console.log(
+    JSON.stringify({
+      id: new URL(url).searchParams.get('v'),
+      extractor_key: 'Youtube',
+      title: 'Video',
+      webpage_url: url,
+      duration: long ? 3000 : 30,
+      vcodec: 'h264',
+      width: 320,
+      height: 240,
+    }),
+  )
+else {
+  await Bun.sleep(long ? 3000 : 200)
+  const out = args[args.indexOf('-o') + 1]!.replace('%(ext)s', 'mp4')
+  copyFileSync(process.env.FAKE_MP4!, out)
+  console.log(out)
+}

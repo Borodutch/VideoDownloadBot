@@ -3,6 +3,9 @@ import { hostname } from 'node:os'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// How long `drain` may take before the exit (bot.e2e.test.ts shortens it)
+export const DRAIN = Number(process.env.DRAIN_MS) || 15_000
+
 /**
  * Zero-downtime deploys for a long-polling bot. Tugport starts the new container next to the old one,
  * but Telegram serves one getUpdates poller at a time, so the poller holds a lock file on a volume both
@@ -52,7 +55,7 @@ export async function pollWithHandover(
     // Tugport kills the old container 30 s after SIGTERM
     await Promise.race([stop(), sleep(10_000)]).catch(console.error)
     if (lock && (await owner()) === me) await fs.unlink(lock).catch(() => {})
-    await Promise.race([drain(), sleep(15_000)]).catch(console.error)
+    await Promise.race([drain(), sleep(DRAIN)]).catch(console.error)
     process.exit(0)
   }
   process.once('SIGTERM', shutdown)

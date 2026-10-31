@@ -9,6 +9,8 @@ import {
   Fail,
   floodWait,
   fresh,
+  isLong,
+  limit,
   links,
   notVideo,
   picked,
@@ -16,8 +18,11 @@ import {
   progress,
   PROGRESS,
   requested,
+  reread,
   sender,
   shown,
+  stale,
+  tellQueued,
   THUMB,
   unready,
   unstarted,
@@ -243,7 +248,7 @@ test('urls: a t.me/s/ channel preview link becomes the post itself', () => {
 test('i18n: every language has every key', () => {
   for (const code of ['en', 'ru', 'es', 'pt-br', 'pt', 'ja', 'zh', 'ar', 'fa'] as const) {
     expect(lang(code)).toBe(code)
-    for (const k of ['failed', 'live', 'upcoming'] as const) expect(t(code, k)).toBeTruthy()
+    for (const k of ['failed', 'live', 'upcoming', 'queued', 'restarting'] as const) expect(t(code, k)).toBeTruthy()
   }
   expect(t('de', 'live')).toBe(t('en', 'live'))
   expect(t('ru', 'upcoming')).not.toBe(t('en', 'upcoming'))
@@ -307,6 +312,253 @@ test('census: audience by chat type and recency, blocked private chats unreachab
   c.member(2, 'member') // unblocked
   c.seen(2, 2, 'private')
   expect(c.stats().audience.private.unreachable).toBe(0)
+})
+
+// Jobs that run until the test ends them: started = the order they got a turn
+function jobs() {
+  const started: string[] = []
+  const end = new Map<string, () => void>()
+  const job = (name: string) => () =>
+    new Promise<void>((done) => {
+      started.push(name)
+      end.set(name, done)
+    })
+  // ends a job and lets the next ones start
+  const finish = async (name: string) => {
+    end.get(name)!()
+    await Bun.sleep(0)
+  }
+  return { started, job, finish }
+}
+
+test("limit: at most max at once, one user's at most max - 1, a free turn goes to whoever has the fewest running", async () => {
+  const run = limit(3)
+  const { started, job, finish } = jobs()
+  const all = [
+    run.run(job('a1'), 'a'),
+    run.run(job('a2'), 'a'),
+    run.run(job('a3'), 'a'),
+    run.run(job('a4'), 'a'),
+    run.run(job('b1'), 'b'),
+    run.run(job('b2'), 'b'),
+  ]
+  await Bun.sleep(0)
+  // a's burst came first (plain FIFO would run all of it before b), but it
+  // leaves b a turn
+  expect(started).toEqual(['a1', 'a2', 'b1'])
+  expect([run.busy(), run.waiting()]).toEqual([true, 3])
+  // a and b have one running each: the first in line goes...
+  await finish('a1')
+  expect(started).toEqual(['a1', 'a2', 'b1', 'a3'])
+  // ...and b's turn goes to b, as a has its two
+  await finish('b1')
+  expect(started).toEqual(['a1', 'a2', 'b1', 'a3', 'b2'])
+  await finish('b2')
+  expect(started).toEqual(['a1', 'a2', 'b1', 'a3', 'b2'])
+  // a turn is free, but not for a
+  expect([run.busy(), run.busy(false, 'a'), run.busy(false, 'c'), run.waiting()]).toEqual([false, true, false, 1])
+  await finish('a2')
+  expect(started).toEqual(['a1', 'a2', 'b1', 'a3', 'b2', 'a4'])
+  await finish('a3')
+  await finish('a4')
+  expect(run.busy()).toBe(false)
+  await Promise.all(all)
+  // a turn ended twice frees one slot, not two
+  const done = await run.take()
+  await run.take()
+  done()
+  done()
+  expect(run.busy()).toBe(false)
+  await run.take()
+  await run.take()
+  expect(run.busy()).toBe(true)
+})
+
+test('limit: a turn handed over counts for its user', async () => {
+  const run = limit(3)
+  const { started, job, finish } = jobs()
+  for (const [name, who] of [['x1', 'x'], ['x2', 'x'], ['y1', 'y'], ['b1', 'b'], ['b2', 'b'], ['c1', 'c']])
+    void run.run(job(name!), who)
+  await Bun.sleep(0)
+  await finish('x1')
+  expect(started).toEqual(['x1', 'x2', 'y1', 'b1'])
+  // b now has one running, c none
+  await finish('x2')
+  expect(started).toEqual(['x1', 'x2', 'y1', 'b1', 'c1'])
+})
+
+test('limit: a failed fn frees its turn', async () => {
+  const run = limit(1)
+  await expect(run.run(() => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
+  expect(await run.run(async () => 'next')).toBe('next')
+})
+
+test('limit: close fails the waiting fns and later ones that would wait or are long, running ones go on', async () => {
+  const run = limit(2, 1)
+  const { started, job, finish } = jobs()
+  const first = run.run(job('a'))
+  const second = run.run(job('b'))
+  const third = run.run(job('c'))
+  await Bun.sleep(0)
+  run.close(new Error('restarting'))
+  await expect(third).rejects.toThrow('restarting')
+  await expect(run.take()).rejects.toThrow('restarting')
+  // nothing waits any more, it fails at once
+  expect(run.busy()).toBe(false)
+  await finish('a')
+  await first
+  // a short one that finds a free turn still runs, a long one never does
+  await expect(run.take(undefined, true)).rejects.toThrow('restarting')
+  const free = await run.take()
+  await expect(run.take()).rejects.toThrow('restarting')
+  free()
+  await finish('b')
+  await second
+  expect(started).toEqual(['a', 'b'])
+})
+
+// Takes a turn for a job that runs until the test finishes it
+const lane = (run: ReturnType<typeof limit>, { started, job }: ReturnType<typeof jobs>) =>
+  (name: string, long: boolean, who = name) =>
+    void run.take(who, long).then(async (free) => {
+      await job(name)()
+      free()
+    })
+
+test('limit: long fns leave a turn for short ones', async () => {
+  const slots = limit(3, 2)
+  const j = jobs()
+  const { started, finish } = j
+  const go = lane(slots, j)
+  go('long1', true)
+  go('long2', true)
+  await Bun.sleep(0)
+  expect(started).toEqual(['long1', 'long2'])
+  // a third long one waits though a turn is free...
+  expect([slots.busy(true), slots.busy(false)]).toEqual([true, false])
+  go('long3', true)
+  await Bun.sleep(0)
+  expect(started).toEqual(['long1', 'long2'])
+  expect([slots.waiting(true), slots.waiting(false)]).toEqual([1, 0])
+  // ...which a short one takes at once
+  go('short1', false)
+  await Bun.sleep(0)
+  expect(started).toEqual(['long1', 'long2', 'short1'])
+  expect(slots.busy(false)).toBe(true)
+  go('short2', false)
+  await Bun.sleep(0)
+  expect([slots.waiting(false), slots.waiting(true)]).toEqual([1, 2])
+  // a long one ending lets the first in line go, a short one ending the short one
+  await finish('long1')
+  expect(started).toEqual(['long1', 'long2', 'short1', 'long3'])
+  await finish('short1')
+  expect(started).toEqual(['long1', 'long2', 'short1', 'long3', 'short2'])
+  // one turn: long ones still run, one at a time
+  const one = limit(1, 1)
+  const free = await one.take(undefined, true)
+  expect([one.busy(true), one.busy(false)]).toEqual([true, true])
+  free()
+  expect(one.busy(true)).toBe(false)
+})
+
+test("limit: a long fn in line holds nothing, so one user's long links don't hold up another's", async () => {
+  // the default: four turns, three for long ones
+  const slots = limit(4, 3)
+  const j = jobs()
+  const go = lane(slots, j)
+  // short ones from four users take every turn
+  for (const u of ['u1', 'u2', 'u3', 'u4']) go(u, false)
+  await Bun.sleep(0)
+  // then a's three long links and b's one
+  go('a1', true, 'a')
+  go('a2', true, 'a')
+  go('a3', true, 'a')
+  go('b1', true, 'b')
+  await Bun.sleep(0)
+  expect(slots.waiting(true)).toBe(4)
+  await j.finish('u1')
+  await j.finish('u2')
+  await j.finish('u3')
+  expect(j.started.slice(4)).toEqual(['a1', 'b1', 'a2'])
+})
+
+test("limit: one user's burst leaves the others a turn, long ones too", async () => {
+  // the default: four turns, three for long ones
+  const slots = limit(4, 3)
+  const j = jobs()
+  const go = lane(slots, j)
+  // a's burst on an idle pool, three long links and two short ones: two
+  // long ones and a short one run, so a long turn and another one stay free
+  go('a1', true, 'a')
+  go('a2', true, 'a')
+  go('a3', true, 'a')
+  go('a4', false, 'a')
+  go('a5', false, 'a')
+  await Bun.sleep(0)
+  expect(j.started).toEqual(['a1', 'a2', 'a4'])
+  expect([slots.busy(true, 'a'), slots.busy(false, 'a'), slots.busy(true, 'b')]).toEqual([true, true, false])
+  // b's long link doesn't wait for one of a's
+  go('b1', true, 'b')
+  await Bun.sleep(0)
+  expect(j.started).toEqual(['a1', 'a2', 'a4', 'b1'])
+  // a's long one ending lets a's next long one go
+  await j.finish('a1')
+  expect(j.started).toEqual(['a1', 'a2', 'a4', 'b1', 'a3'])
+  // one ending can let two in: with one long turn and two in all, a's long
+  // one ending lets in a's short one, which a's part held back, and b's long one
+  const k = jobs()
+  const two = lane(limit(2, 1), k)
+  two('a1', true, 'a')
+  two('a2', false, 'a')
+  two('b1', true, 'b')
+  await Bun.sleep(0)
+  expect(k.started).toEqual(['a1'])
+  await k.finish('a1')
+  expect(k.started).toEqual(['a1', 'a2', 'b1'])
+  // the same goes for -J turns
+  const meta = limit(4)
+  for (let i = 0; i < 3; i++) await meta.take('a')
+  expect([meta.busy(false, 'a'), meta.busy(false, 'b')]).toEqual([true, false])
+  // with one long turn, a user may take it; fns without a user share no part
+  const small = limit(2, 1)
+  await small.take('a', true)
+  expect([small.busy(false, 'a'), small.busy(false, 'b')]).toEqual([true, false])
+  const check = limit(2)
+  await check.take()
+  await check.take()
+  expect(check.busy()).toBe(true)
+})
+
+test('isLong: over 10 minutes or of unknown length', () => {
+  expect(isLong({ duration: 15 })).toBe(false)
+  expect(isLong({ duration: 599.9 })).toBe(false)
+  expect(isLong({ duration: 600 })).toBe(false)
+  expect(isLong({ duration: 601 })).toBe(true)
+  // the Eporner videos that held every slot for 20+ minutes (#296)
+  expect(isLong({ duration: 2570 })).toBe(true)
+  expect(isLong({})).toBe(true)
+  expect(isLong({ duration: null })).toBe(true)
+  expect(isLong({ duration: 0 })).toBe(true)
+})
+
+test('tellQueued: private chats and summons hear a link is queued or dropped by a restart, groups otherwise not', () => {
+  expect(tellQueued('private', false)).toBe(true)
+  expect(tellQueued('group', true)).toBe(true)
+  expect(tellQueued('supergroup', true)).toBe(true)
+  expect(tellQueued('group', false)).toBe(false)
+  expect(tellQueued('supergroup', false)).toBe(false)
+})
+
+test('reread: a failed download reads the page again only from info over a minute old, not after a timeout', () => {
+  const expired = 'ERROR: unable to download video data: HTTP Error 403: Forbidden'
+  expect(reread(30_000, expired)).toBe(false)
+  expect(reread(5 * 60_000, expired)).toBe(true)
+  expect(reread(5 * 60_000, 'yt-dlp timed out after 30 min')).toBe(false)
+  // yt-dlp's own network timeouts are no reason not to
+  expect(reread(5 * 60_000, 'ERROR: unable to download video data: Read timed out. (read timeout=20.0)')).toBe(true)
+  expect(reread(5 * 60_000, 'ERROR: Connection to cdn.example timed out. (connect timeout=20.0)')).toBe(true)
+  // the same age makes a download from saved info stop at a missing fragment
+  expect([stale(30_000), stale(5 * 60_000)]).toEqual([false, true])
 })
 
 test('only cached file_ids skip the document fallback', () => {

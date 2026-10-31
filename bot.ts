@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { chmod, copyFile, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { egressProxy, proxyFreeEnv } from './egress'
-import { pollWithHandover } from './handover'
+import { DRAIN, pollWithHandover } from './handover'
 import { type Key, t } from './i18n'
 import { type Promo, promos } from './promo'
 import { scratch } from './scratch'
@@ -19,7 +19,7 @@ const DATA = env.DATA_DIR || './data'
 // file:// paths only work with a local Bot API server
 const SCRATCH = scratch(API.includes('api.telegram.org') ? '' : undefined)
 const TMP = SCRATCH.dir
-const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 3)
+const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 4)
 // Only formats whose every request goes through the proxy: yt-dlp's own HTTP
 // (HLS, DASH, websockets) and ffmpeg's http(s), which yt-dlp hands the proxy
 // to. rtmp, rtsp and mms would connect directly.
@@ -52,8 +52,10 @@ type Opts = Parameters<Context['api']['sendVideo']>[2] &
 // Where a file goes: a chat, replying to a message there, with a promo line
 // or button if the user's experiment arm has one (promo.ts); sent = the id
 // of the message that carried it; stale = a cached video that went out
-// without a size, being downloaded again to replace it
-type Dest = { chat: number | string; reply?: number; sent?: number; promo?: Promo; stale?: number }
+// without a size, being downloaded again to replace it; who = the user who
+// asked, whose jobs take turns with everyone else's (limit); uploading = its
+// own job has begun the upload
+type Dest = { chat: number | string; reply?: number; sent?: number; promo?: Promo; stale?: number; who?: number; uploading?: boolean }
 // Guest replies can't upload, so their files go through this chat first
 // (the message is deleted right after, the file_id stays valid)
 const STORAGE = env.STORAGE_CHAT || env.ADMIN_ID
@@ -129,6 +131,12 @@ const TWEET_NO_VIDEO = /\[twitter\].*no video could be found/i
 export const answer = (key: Key | null, chat: string, called: boolean, why = '') =>
   TWEET_NO_VIDEO.test(why) ? null : key ?? (chat === 'private' || called ? 'failed' : null)
 
+// Whether a chat hears that its link waits for a slot, or that a restart
+// dropped it. Groups only do when they asked the bot itself: a burst of links
+// there would become a burst of replies on top of the videos, and Telegram
+// allows a group ~20 messages a minute (a 429 isn't retried).
+export const tellQueued = (chat: string, called: boolean) => chat === 'private' || called
+
 // t.me/s/<channel>/<post> is the channel's web preview, which yt-dlp reads
 // as a list of the latest posts: the post itself is t.me/<channel>/<post>
 const tme = (url: URL) => {
@@ -182,7 +190,7 @@ const NOT_SITES = new Set(['generic', 'DRM', 'Piracy', 'Liability'])
 export async function claims(urls: string[]) {
   const by = new Map<string, string[]>()
   if (!urls.length) return by
-  const { out } = await check(() => ytdlp(['--list-extractors', '--', ...urls]))
+  const { out } = await check.run(() => ytdlp(['--list-extractors', '--', ...urls]))
   let ie = ''
   for (const line of out.split('\n'))
     if (!line.startsWith(' ')) ie = line.replace(/ \(CURRENTLY BROKEN\)$/, '')
@@ -228,33 +236,42 @@ function isPublic(host: string) {
 let proxy: Promise<string> | undefined
 // ponytail: in-process daily self-update; pin a version if nightly ever breaks
 // The update swaps the binary out, so a run started meanwhile waits for it
-// (else spawn fails with "Executable not found")
+// (else spawn fails with "Executable not found"); it takes seconds, and a
+// hung one can't hold every download back for long
 let updating: Promise<unknown> = Promise.resolve()
 const update = () =>
   (updating = Bun.spawn(['yt-dlp', '--update-to', 'nightly'], {
     env: { ...process.env, ...SCRATCH.env },
     stdout: 'inherit',
+    timeout: 5 * 60_000,
   }).exited)
 
-async function ytdlp(args: string[]) {
+async function ytdlp(args: string[], timeout = 30 * 60_000) {
   // a failed listen isn't kept: the next download tries again
   proxy ??= egressProxy().catch((e) => {
     proxy = undefined
     throw e
   })
   await updating
-  const p = Bun.spawn(['yt-dlp', '--proxy', await proxy, ...args], {
+  const via = await proxy
+  const start = Date.now()
+  const p = Bun.spawn(['yt-dlp', '--proxy', via, ...args], {
     env: { ...proxyFreeEnv(), ...SCRATCH.env },
     stdout: 'pipe',
     stderr: 'pipe',
-    timeout: 30 * 60_000,
+    timeout,
   })
   const [out, err, code] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),
     p.exited,
   ])
-  if (code) throw new Error(err.trim().split('\n').pop() || `yt-dlp ${code}`)
+  if (code)
+    throw new Error(
+      Date.now() - start >= timeout
+        ? `yt-dlp timed out after ${timeout / 60_000} min`
+        : err.trim().split('\n').pop() || `yt-dlp ${code}`,
+    )
   return { out, err }
 }
 
@@ -306,23 +323,115 @@ export const THUMB = "scale='iw*sar':ih,scale=320:320:force_original_aspect_rati
 export const fresh = (f: string | InputFile) =>
   typeof f !== 'string' || f.startsWith('file:')
 
-// Runs at most max fns at once, the rest wait their turn
-function limit(max: number) {
+// Runs at most max fns at once, long ones at most maxLong of them, the rest
+// wait their turn. who = whose fn (a user): one user's fns get at most
+// max - 1 turns, and long ones maxLong - 1 (all of them when there's only
+// one), so a burst of one user's links always leaves someone else a turn; a
+// free turn goes to the first in line among those with the fewest running
+// whose fn fits. Fns without a who share no such limit. A fn in line holds
+// nothing.
+export function limit(max: number, maxLong = max) {
   let running = 0
-  const queue: (() => void)[] = []
-  return async <T>(fn: () => Promise<T>) => {
-    if (running < max) running++
-    else await new Promise<void>((r) => queue.push(r))
-    try {
-      return await fn()
-    } finally {
-      const next = queue.shift()
-      if (next) next()
-      else running--
+  let long = 0
+  // each user's running fns: all of them and the long ones
+  const per = new Map<unknown, { all: number; long: number }>()
+  const mine = (who: unknown) => per.get(who) ?? { all: 0, long: 0 }
+  const add = (who: unknown, isLong: boolean, n: number) => {
+    running += n
+    if (isLong) long += n
+    const m = mine(who)
+    const now = { all: m.all + n, long: m.long + (isLong ? n : 0) }
+    if (now.all) per.set(who, now)
+    else per.delete(who)
+  }
+  // one user's part of n turns
+  const share = (n: number) => Math.max(1, n - 1)
+  const fits = (who: unknown, isLong: boolean) => {
+    const m = mine(who)
+    return (
+      running < max &&
+      !(isLong && long >= maxLong) &&
+      (who === undefined || (m.all < share(max) && !(isLong && m.long >= share(maxLong))))
+    )
+  }
+  // Nothing in line fits: ended turns go to the ones that do (one ending can
+  // let in two: one its user's part held back, and one more), so a new fn
+  // that fits jumps nobody who could run
+  const queue: { who: unknown; long: boolean; go: () => void; stop: (e: Error) => void }[] = []
+  let closed: Error | undefined
+  // Waits for a turn; the returned fn ends it
+  const take = async (who?: unknown, isLong = false) => {
+    if (closed && (isLong || !fits(who, isLong))) throw closed
+    if (fits(who, isLong)) add(who, isLong, 1)
+    else await new Promise<void>((go, stop) => queue.push({ who, long: isLong, go, stop })) // counted in by whoever hands over
+    let done = false
+    return () => {
+      if (done) return
+      done = true
+      add(who, isLong, -1)
+      for (;;) {
+        let next = -1
+        queue.forEach((w, i) => {
+          if (fits(w.who, w.long) && (next < 0 || mine(w.who).all < mine(queue[next]!.who).all))
+            next = i
+        })
+        if (next < 0) return
+        const w = queue.splice(next, 1)[0]!
+        add(w.who, w.long, 1)
+        w.go()
+      }
     }
   }
+  return {
+    take,
+    async run<T>(fn: () => Promise<T>, who?: unknown) {
+      const done = await take(who)
+      try {
+        return await fn()
+      } finally {
+        done()
+      }
+    },
+    // whether a new fn of who's would have to wait (once closed, it fails or
+    // starts at once)
+    busy: (isLong = false, who?: unknown) => !closed && !fits(who, isLong),
+    // the fns in line a new one would wait behind: long ones only count for
+    // a short one while they could have a turn
+    waiting: (isLong = false) =>
+      queue.filter((w) => isLong || !w.long || long < maxLong).length,
+    // Fails the fns still waiting with e, and later ones that would have to
+    // wait or are long (a restart has time for a short one); running ones go on
+    close(e: Error) {
+      closed = e
+      for (const w of queue.splice(0)) w.stop(e)
+    },
+  }
 }
-const slot = limit(MAX_DOWNLOADS)
+
+// Long videos: over 10 minutes, or of unknown length
+export const LONG = 10 * 60
+export const isLong = (v: { duration?: number | null }) =>
+  !(v.duration && v.duration > 0 && v.duration <= LONG)
+
+// yt-dlp's saved info over a minute old: its media links may have expired
+// while the job waited its turn
+export const stale = (age: number) => age > 60_000
+// Whether a download from stale saved info that failed gets another try
+// that reads the page again: not after it ran out of time (ytdlp's own
+// error; yt-dlp's network errors can say "timed out" too)
+export const reread = (age: number, why: string) =>
+  stale(age) && !/^yt-dlp timed out after /.test(why)
+
+// The slots for downloading and sending videos. Long ones (20-40 min each on
+// some sites) take at most MAX_DOWNLOADS - 1 of them (with one slot, that
+// one), so long downloads never hold every slot; one user's get one fewer
+// when there are more (limit), so another user's long video doesn't wait for
+// theirs either. The whole download and upload holds a slot:
+// a link flood can't fork unbounded yt-dlp runs or pile finished files up in
+// TMP while uploads crawl
+const slots = limit(MAX_DOWNLOADS, Math.max(1, MAX_DOWNLOADS - 1))
+// yt-dlp -J, which tells a job's lane, runs before it takes a slot
+const meta = limit(MAX_DOWNLOADS)
 // group links are checked one yt-dlp run per message: a flood of them
 // queues instead of forking a process each
 const check = limit(2)
@@ -590,6 +699,9 @@ export function census(db: Database) {
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
+// Seconds since t, for the job log
+const elapsed = (t: number) => ((Date.now() - t) / 1000).toFixed(1)
+
 function main() {
   const db = new Database(join(DATA, 'bot.sqlite'), { create: true })
   db.run(
@@ -629,6 +741,14 @@ function main() {
   const flood = floodWait()
   bot.api.config.use(flood)
   const jobs = new Map<string, Promise<File>>()
+  // The other requests for a link whose job runs follow its statuses: tell =
+  // each one's, key = the job's last
+  const watching = new Map<string, { key?: Key; tell: Set<(key: Key) => void> }>()
+  // The requests running now, each with a way to tell its chat that the exit
+  // cuts it off
+  const open = new Set<() => void>()
+  // Set by the exit's cut: from then on no job begins an upload (job())
+  let exiting = false
   // Handlers run detached; counted so a deploy lets the running ones finish
   let running = 0
   const track = (p: Promise<unknown>) => {
@@ -686,24 +806,63 @@ function main() {
   ): Promise<File> {
     if (dest.reply)
       void bot.api.sendChatAction(dest.chat, 'upload_video').catch(() => {})
-    // the whole job holds a slot: a link flood can't fork unbounded yt-dlp
-    // runs or pile finished files up in TMP while uploads crawl
-    return slot(() => job(dest, url, status))
+    // One line per job, for where the time goes (in seconds): the wait for a
+    // yt-dlp -J turn and the run, the wait for a slot and how many jobs were
+    // ahead, the download, and probe, thumbnail and upload together
+    const log: Record<string, string | number> = { host: new URL(url).hostname }
+    const start = Date.now()
+    let result = 'ok'
+    try {
+      const f = await job(dest, url, status, log)
+      // only an upload times it
+      if (!log.up) result = 'cached'
+      return f
+    } catch (e) {
+      result = e instanceof Fail ? `fail:${e.key ?? 'quiet'}` : 'error'
+      throw e
+    } finally {
+      log.total = elapsed(start)
+      console.log('job', result, Object.entries(log).map(([k, v]) => `${k}=${v}`).join(' '))
+    }
   }
 
   async function job(
     dest: Dest,
     url: string,
     status: (key: Key) => Promise<void>,
+    log: Record<string, string | number>,
   ): Promise<File> {
     const dir = await mkdtemp(join(TMP, 'job-'))
+    let free = () => {}
+    // a link that has to wait for a -J turn or a slot would otherwise look
+    // ignored: it hears it's queued, once
+    let queued = false
+    const wait = async (busy: boolean) => {
+      if (!busy || queued) return
+      queued = true
+      await status('queued').catch(() => {})
+    }
     try {
       await SCRATCH.open(dir)
-      const args = [...YTDLP, ...(await jar(dir))]
+      let args = [...YTDLP, ...(await jar(dir))]
       let json: string
+      const asked = Date.now()
+      await wait(meta.busy(false, dest.who))
       try {
-        json = (await ytdlp([...args, '-J', url])).out
+        json = (
+          await meta.run(async () => {
+            log.metaq = elapsed(asked)
+            const t = Date.now()
+            try {
+              return await ytdlp([...args, '-J', url], 5 * 60_000)
+            } finally {
+              log.meta = elapsed(t)
+            }
+          }, dest.who)
+        ).out
       } catch (e) {
+        // a restart (meta.close) isn't the link's fault
+        if (e instanceof Fail) throw e
         const why = String((e as Error).message)
         const soon = unstarted(why)
         if (soon) throw new Fail(soon, why)
@@ -713,16 +872,23 @@ function main() {
           : ((await claims([url]).catch(() => undefined))?.get(url) ?? [])
         throw new Fail(notVideo(why, ies) ? null : 'failed', why)
       }
+      const extracted = Date.now()
       const v = picked(JSON.parse(json))
       const stream = unready(v)
       if (stream) throw new Fail(stream, `${stream} stream`)
       const id = `${v.extractor_key}:${v.id}`
-      const hit = get.get(id)
-      // a refresh wants a new upload, not another cached copy
-      if (hit && !dest.stale && (await resend(dest, hit))) {
-        put(url, hit)
-        return hit
+      // The video may be cached under another link, or get cached by another
+      // job while this one waits; a refresh wants a new upload, not another
+      // cached copy
+      const fromCache = async () => {
+        const hit = get.get(id)
+        if (hit && !dest.stale && (await resend(dest, hit))) {
+          put(url, hit)
+          return hit
+        }
       }
+      const hit = await fromCache()
+      if (hit) return hit
       const formats: { filesize?: number; filesize_approx?: number }[] =
         v.requested_formats ?? [v]
       const size = formats.reduce(
@@ -731,22 +897,53 @@ function main() {
       )
       if (size > LIMIT) throw new Fail('tooBig')
 
+      const long = isLong(v)
+      log.lane = long ? 'long' : 'short'
+      log.ahead = slots.waiting(long)
+      log.dur = v.duration ? Math.round(v.duration) : '?'
+      await wait(slots.busy(long, dest.who))
+      const waited = Date.now()
+      free = await slots.take(dest.who, long)
+      log.wait = elapsed(waited)
+      const sent = await fromCache()
+      if (sent) return sent
+      // another run may have saved newer cookies while this one waited
+      if (taken.has(dir) && (await stat(JAR)).mtimeMs !== taken.get(dir))
+        args = [...YTDLP, ...(await jar(dir))]
+
       await status('downloading')
       await Bun.write(join(dir, 'info.json'), json)
-      const { out, err } = await ytdlp([
-        ...args,
+      const grab = (source: string[]) =>
+        ytdlp([
+          ...args,
+          ...source,
+          '-o', join(dir, 'v.%(ext)s'),
+          '--max-filesize', String(LIMIT),
+          '--print', 'after_move:filepath',
+        ])
+      const fetched = Date.now()
+      const age = fetched - extracted
+      const { out, err } = await grab([
         '--load-info-json', join(dir, 'info.json'),
-        '-o', join(dir, 'v.%(ext)s'),
-        '--max-filesize', String(LIMIT),
-        '--print', 'after_move:filepath',
-      ])
+        // a fragment lost to an expired link fails it (and it reads the page
+        // again) rather than leave a gap in the video
+        ...(stale(age) ? ['--abort-on-unavailable-fragments'] : []),
+      ]).catch((e) => {
+        if (!reread(age, String(e.message))) throw e
+        log.reread = 1
+        return grab([url])
+      })
+      log.dl = elapsed(fetched)
       const path = out.trim().split('\n').pop()
       // --print implies --quiet, so a file over --max-filesize is skipped
       // with exit 0 and no output at all
       if (!path || !existsSync(path))
         throw new Fail(err.trim() ? 'failed' : 'tooBig', err)
-      if ((await stat(path)).size > LIMIT) throw new Fail('tooBig')
+      const bytes = (await stat(path)).size
+      log.mb = Math.round(bytes / 2 ** 20)
+      if (bytes > LIMIT) throw new Fail('tooBig')
 
+      const sending = Date.now()
       await status('uploading')
       await SCRATCH.open(path, true)
       const audio = v.vcodec === 'none'
@@ -762,6 +959,14 @@ function main() {
           thumb,
         ]).exited
       const f = { title: v.title || 'Video', url: v.webpage_url || url }
+      // Past the exit's cut the job's chats have heard to send the link
+      // again, or hear it now (a guest reply, a request that came after the
+      // cut): an upload begun now would go out next to that, finished by a
+      // local Bot API server after the exit, and a refresh would leave both
+      // videos. Once the upload has begun (before the cut), the cut leaves
+      // the job's request alone (cutOff).
+      if (exiting) throw new Fail('restarting')
+      dest.uploading = true
       const [kind, file_id] = await send(
         dest,
         audio ? 'audio' : 'video',
@@ -776,6 +981,7 @@ function main() {
           performer: audio ? v.uploader : undefined,
         },
       )
+      log.up = elapsed(sending)
       const file = { ...f, kind, file_id }
       settle(file_id)
       put(id, file)
@@ -783,29 +989,63 @@ function main() {
       return file
     } finally {
       await saveJar(dir).catch(console.error)
-      await rm(dir, { recursive: true, force: true })
+      // the slot is held until the files are gone
+      await rm(dir, { recursive: true, force: true }).finally(free)
     }
   }
 
   // Puts the file into dest.chat: from the cache, from a running job for the
-  // same link, or downloaded now
+  // same link, or downloaded now. status(key, true) is that running job's
+  // status: shown only where a queued one would be.
   async function deliver(
     dest: Dest,
     url: string,
-    status: (key: Key) => Promise<void>,
+    status: (key: Key, follow?: boolean) => Promise<void>,
   ): Promise<File> {
     const cached = get.get(url)
     if (cached && (await resend(dest, cached, (id) => (dest.stale = id))))
       return dest.stale ? refresh(dest, url, cached) : cached
     const job = jobs.get(url)
     if (job) {
-      const f = await job
+      const f = await follow(url, job, status)
       if (!(await resend(dest, f))) throw new Fail('failed')
       return f
     }
-    const fresh = download(dest, url, status).finally(() => jobs.delete(url))
+    const watch = { key: undefined as Key | undefined, tell: new Set<(key: Key) => void>() }
+    watching.set(url, watch)
+    const fresh = download(dest, url, (key) => {
+      watch.key = key
+      for (const tell of watch.tell) tell(key)
+      return status(key)
+    }).finally(() => {
+      jobs.delete(url)
+      watching.delete(url)
+    })
     jobs.set(url, fresh)
     return fresh
+  }
+
+  // Waits for the job of another request for the link, this one's status
+  // following the job's: the job's status so far at once, then each new one
+  async function follow(
+    url: string,
+    job: Promise<File>,
+    status: (key: Key, follow?: boolean) => Promise<void>,
+  ) {
+    const watch = watching.get(url)
+    let told = Promise.resolve()
+    const tell = (key: Key) => {
+      told = told.then(() => status(key, true)).catch(() => {})
+    }
+    if (watch?.key) tell(watch.key)
+    watch?.tell.add(tell)
+    try {
+      return await job
+    } finally {
+      watch?.tell.delete(tell)
+      // the status is up before the caller edits or deletes it
+      await told
+    }
   }
 
   // The unsized video already went out: a fresh download replaces it, and if
@@ -828,7 +1068,13 @@ function main() {
   async function handle(ctx: Context, url: string) {
     const lang = ctx.from?.language_code
     let statusId: number | undefined
-    const show = async (key: Key, signal?: Signal) => {
+    const show = async (key: Key, follow = false, signal?: Signal) => {
+      if (
+        !statusId &&
+        (follow || key === 'queued' || key === 'restarting') &&
+        !tellQueued(ctx.chat!.type, summoned(ctx.msg!, ctx.me.username))
+      )
+        return
       if (statusId)
         await ctx.api
           .editMessageText(ctx.chat!.id, statusId, t(lang, key), undefined, signal)
@@ -847,24 +1093,58 @@ function main() {
           )
         ).message_id
     }
+    // Status calls go one at a time, each after the one before it (the exit's
+    // notice too); once the exit cuts the request off, the chat keeps that
+    let shown = Promise.resolve()
+    const then = <T>(call: () => Promise<T>) => {
+      const p = shown.then(call)
+      shown = p.then(() => {}, () => {})
+      return p
+    }
+    let cut = false
     // progress isn't worth a flood wait; the answer to a failure still waits
     // its turn
-    const status = (key: Key) =>
-      progress(flood.flooded(ctx.chat!.id), (signal) => show(key, signal))
+    const status = (key: Key, follow = false) =>
+      then(() =>
+        cut ? Promise.resolve() : progress(flood.flooded(ctx.chat!.id), (signal) => show(key, follow, signal)),
+      )
     const d = ctx.from
       ? promo.decide(ctx.from.id, ctx.chat!.type, lang)
       : null
+    const dest: Dest = {
+      chat: ctx.chat!.id,
+      reply: ctx.msg!.message_id,
+      promo: d?.promo,
+      // anonymous admins and channel posts all come from one bot user
+      who: ctx.msg!.sender_chat?.id ?? ctx.from?.id,
+    }
+    // The exit cuts off a request whose job hasn't begun its upload (past
+    // the cut none begins one: job()), "⏫" or not. A request that has ended
+    // (its final status or delete on its way), whose chat has its file (a
+    // refresh may still run) or whose own job has begun the upload (a local
+    // Bot API server finishes one by path after the exit) is left alone. One
+    // following another request's job is cut: its own copy goes out only
+    // after that job's.
+    let ended = false
+    const cutOff = () => {
+      if (ended || dest.sent || dest.uploading) return
+      cut = true
+      void then(() =>
+        progress(flood.flooded(ctx.chat!.id), (signal) => show('restarting', false, signal)),
+      ).catch(() => {})
+    }
+    open.add(cutOff)
     try {
-      await deliver(
-        { chat: ctx.chat!.id, reply: ctx.msg!.message_id, promo: d?.promo },
-        url,
-        status,
-      )
+      await deliver(dest, url, status)
+      ended = true
       promo.record(d)
       if (ctx.from && ctx.chat!.type === 'private') promo.used(ctx.from.id)
+      // a status still on its way is up before it goes, the exit's notice too
+      await shown
       if (statusId)
         await ctx.api.deleteMessage(ctx.chat!.id, statusId).catch(() => {})
     } catch (e) {
+      ended = true
       console.error('failed', url, (e as Error).message)
       const key = answer(
         e instanceof Fail ? e.key : 'failed',
@@ -872,7 +1152,15 @@ function main() {
         summoned(ctx.msg!, ctx.me.username),
         (e as Error).message,
       )
-      if (key) await show(key).catch(() => {})
+      if (key) await then(() => (cut ? Promise.resolve() : show(key))).catch(() => {})
+      // nothing to say (a tweet without a video), but a status may be up (it
+      // waited for a -J turn): it goes, as on success
+      else
+        await then(async () => {
+          if (!cut && statusId) await ctx.api.deleteMessage(ctx.chat!.id, statusId)
+        }).catch(() => {})
+    } finally {
+      open.delete(cutOff)
     }
   }
 
@@ -896,7 +1184,7 @@ function main() {
         .editMessageTextInline(id, t(lang, key), undefined, signal)
         .then(() => {}, () => {})
     if (!STORAGE) return status('failed')
-    const dest: Dest = { chat: STORAGE }
+    const dest: Dest = { chat: STORAGE, who: ctx.from?.id }
     try {
       // progress isn't worth a flood wait, as in handle()
       const f = await deliver(dest, url, (key) => status(key, PROGRESS))
@@ -997,7 +1285,21 @@ function main() {
       },
       () => bot.stop(),
       async () => {
+        // the links still waiting for a yt-dlp -J turn or a slot won't get
+        // one here (the new container polls by now), nor will a long video
+        // (it couldn't finish before the exit): they hear so rather than stay
+        // "in the queue". A short one that finds a free turn still goes.
+        meta.close(new Fail('restarting'))
+        slots.close(new Fail('restarting'))
+        // the jobs still running 2 s before the exit won't finish: their
+        // chats hear so the same way, rather than keep "Downloading…", and
+        // from then on no upload begins
+        const exit = setTimeout(() => {
+          exiting = true
+          open.forEach((cut) => cut())
+        }, DRAIN - 2_000)
         while (running) await Bun.sleep(100)
+        clearTimeout(exit)
         await promo.flush()
       },
     ),
