@@ -9,15 +9,19 @@
 // with "broken" in it stops partway, 3 MB in; one with "huge" in it stops 3 MB
 // in without a word, as at --max-filesize; one with "expired" in it fails after
 // 4 s from saved info, as an expired media link would, and crawls from the
-// page; one with "ffmpeg" in it, 2 MB in, waits 20 s for a child that has its
-// stdout and stderr, as yt-dlp waits for the ffmpeg it hands m3u8 to, a child
-// that ignores SIGTERM when "stubborn" is in it too; one with "linger" in it
-// leaves a process in its group that doesn't hold its output and outlives it
-// by 15 s, writing "up", then "done" or "TERM" if it got SIGTERM, to
-// $LINGER/<id>.<its pid>; one with "endless" in it, as an HLS stream of
-// unknown size, starts a 20 s child that has its stdout and stderr (as
-// ffmpeg would), has 2 MB, then after 0.5 s 2001 MB (a sparse file), and is
-// done with that file when the child is; with $LINGER set it also leaves a
+// page; one with "linger" in it first leaves a process in its group that
+// doesn't hold its output and outlives it by 15 s, writing "up", then "done"
+// or "TERM" if it got SIGTERM, to $LINGER/<id>.<its pid>, or with "deaf" in it
+// too one that ignores SIGTERM and lives 10 s; one with "ffmpeg" in it, 2 MB
+// in, waits 20 s for a child that has its stdout and stderr, as yt-dlp waits
+// for the ffmpeg it hands m3u8 to, a child that ignores SIGTERM when
+// "stubborn" is in it too (with $LINGER set, its pid goes to
+// $LINGER/<id>.pid), and one in a session of its own, out of yt-dlp's
+// process group, when "escape" is; one with "endless" in it, as an HLS
+// stream of unknown size, starts a 20 s child that has its stdout and stderr
+// (as ffmpeg would), in a session of its own when "escape" is in it too, has
+// 2 MB, then after 0.5 s 2001 MB (a sparse file), and is done with that file
+// when the child is; with $LINGER set it also leaves a
 // process in its group that ignores SIGTERM, doesn't hold its output and
 // writes "up", then "done" 7 s later, to $LINGER/<id>.<its pid>; one with
 // "parts" in it has a merge on disk for 1 s, 1900 and 100 MB parts and their
@@ -67,16 +71,26 @@ else {
     console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden')
     process.exit(1)
   }
-  if (url.includes('ffmpeg')) {
-    writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
-    const child = url.includes('stubborn') ? ['sh', '-c', "trap '' TERM; exec sleep 20"] : ['sleep', '20']
-    await Bun.spawn(child, { stdout: 'inherit', stderr: 'inherit' }).exited
-  }
-  if (url.includes('linger'))
-    Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap 'echo TERM >> "$log"; exit' TERM; echo up >> "$log"; sleep 15 & wait; echo done >> "$log"`], {
+  if (url.includes('linger')) {
+    const deaf = url.includes('deaf')
+    const trap = deaf ? "trap '' TERM" : `trap 'echo TERM >> "$log"; exit' TERM`
+    Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; ${trap}; echo up >> "$log"; sleep ${deaf ? 10 : 15} & wait; echo done >> "$log"`], {
       env: { ...process.env, V: new URL(url).searchParams.get('v')! },
       stdio: ['ignore', 'ignore', 'ignore'],
     }).unref()
+  }
+  if (url.includes('ffmpeg')) {
+    writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
+    const child = url.includes('stubborn')
+      ? ['sh', '-c', `[ -n "$LINGER" ] && echo $$ > "$LINGER/$V.pid"; trap '' TERM; exec sleep 20`]
+      : ['sleep', '20']
+    await Bun.spawn(child, {
+      env: { ...process.env, V: new URL(url).searchParams.get('v')! },
+      stdout: 'inherit',
+      stderr: 'inherit',
+      detached: url.includes('escape'),
+    }).exited
+  }
   // MB on disk without writing them
   const sparse = (path: string, mb: number) => {
     writeFileSync(path, '')
@@ -84,7 +98,7 @@ else {
   }
   if (url.includes('endless')) {
     // before the file is too big: a stop would miss a child forked as it comes
-    const child = Bun.spawn(['sleep', '20'], { stdout: 'inherit', stderr: 'inherit' })
+    const child = Bun.spawn(['sleep', '20'], { stdout: 'inherit', stderr: 'inherit', detached: url.includes('escape') })
     if (process.env.LINGER)
       Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; sleep 7; echo done >> "$log"`], {
         env: { ...process.env, V: new URL(url).searchParams.get('v')! },

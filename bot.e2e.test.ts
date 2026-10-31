@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { t } from './i18n'
@@ -625,9 +625,9 @@ test.skipIf(skip)(
     // endlessstream2's saved info is stale, so a failed download of it would
     // read the page again. Its file passes 2000 MB 0.5 s in, and its yt-dlp
     // would go on for 20 s. It leaves a process in its group that ignores the
-    // stop's SIGTERM and lives 7 s: the SIGKILL 5 s after the stop may not
-    // reach it, as the run is over by then. parts3 has a merge on disk, each
-    // file 2000 MB at most and 4000 MB together, and goes out.
+    // stop's SIGTERM, doesn't hold its output and would live 7 s: it gets the
+    // SIGKILL as the run ends. parts3 has a merge on disk, each file 2000 MB
+    // at most and 4000 MB together, and goes out.
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
     const log = () => readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8'))
     const bot = start({ MINUTE_MS: '250', LINGER: dir })
@@ -639,14 +639,14 @@ test.skipIf(skip)(
       bot.link(2, 'endlessstream2')
       bot.link(3, 'parts3')
       await bot.until(() => bot.videos().length === 2 && bot.statuses(2).some((s) => s.startsWith('😱')))
-      // past the SIGKILL's time
+      // past the 7 s it would live
       for (let i = 0; i < 200 && !log().some((l) => l.includes('done')); i++) await Bun.sleep(50)
       lingered = log()
     } finally {
       jobs = await bot.stop()
       rmSync(dir, { recursive: true, force: true })
     }
-    expect(lingered).toEqual(['up\ndone\n'])
+    expect(lingered).toEqual(['up\n'])
     expect(bot.videos().map((v) => v.chat).sort()).toEqual([1, 3])
     expect(bot.statuses(2).map((s) => [...s][0])).toEqual(['⏳', '⏬', '😱'])
     expect(bot.statuses(2).at(-1)).toBe(t('en', 'tooBig'))
@@ -663,30 +663,132 @@ test.skipIf(skip)(
 )
 
 test.skipIf(skip)(
-  'bot: the time limit also stops a child of yt-dlp that holds its output, as ffmpeg does',
+  'bot: the time limit also stops a child of yt-dlp that holds its output, as ffmpeg does, and frees the slot',
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s, and the child
     // would keep yt-dlp's stdout and stderr open for 20 s; the second one's
-    // child ignores SIGTERM, so it takes the SIGKILL 5 s later
-    const bot = start({ MINUTE_MS: '250' })
+    // child ignores SIGTERM: its job ends 5 s later all the same, and the
+    // child must take the SIGKILL then, rather than go on to its 20 s. The
+    // two hold both slots, so a third link waits for the first one's
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-stubborn-'))
+    const bot = start({ MINUTE_MS: '250', LINGER: dir })
+    // a zombie counts as gone: a container's PID 1 may never reap the orphan
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0)
+        const state = existsSync('/proc')
+          ? readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').pop()!
+          : Bun.spawnSync(['ps', '-o', 'stat=', '-p', String(pid)]).stdout.toString().trim()
+        return state !== '' && !state.startsWith('Z')
+      } catch {
+        return false
+      }
+    }
     let jobs: string[] = []
+    let stubborn = 0
+    let survived = true
     try {
       bot.link(1, 'ffmpeg1')
       bot.link(2, 'stubbornffmpeg1')
-      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))), 25_000)
+      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('⏬'))))
+      bot.link(3, 'next1')
+      await bot.until(
+        () => bot.videos().length === 1 && [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))),
+        25_000,
+      )
+      stubborn = Number(readFileSync(join(dir, 'stubbornffmpeg1.pid'), 'utf8'))
+      // gone within a second of its job's end
+      for (let i = 0; i < 20 && alive(stubborn); i++) await Bun.sleep(50)
+      survived = alive(stubborn)
     } finally {
       jobs = await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
     }
-    expect(bot.videos()).toHaveLength(0)
+    expect(stubborn).toBeGreaterThan(0)
+    expect(survived).toBe(false)
+    expect(bot.videos().map((v) => v.chat)).toEqual([3])
     for (const chat of [1, 2]) expect(bot.statuses(chat).map((s) => [...s][0])).toEqual(['⏬', '😱'])
-    expect(jobs).toHaveLength(2)
-    for (const line of jobs)
+    expect(jobs).toHaveLength(3)
+    const timeouts = jobs.filter((l) => l.startsWith('job timeout '))
+    expect(timeouts).toHaveLength(2)
+    for (const line of timeouts)
       expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=short .* dl=\d+\.\d mb=2 total=/)
-    const [term, kill] = jobs.map((l) => Number(/ dl=([\d.]+)/.exec(l)![1])).sort((a, b) => a - b)
+    const [term, kill] = timeouts.map((l) => Number(/ dl=([\d.]+)/.exec(l)![1])).sort((a, b) => a - b)
     expect(term).toBeGreaterThanOrEqual(7.5)
     expect(term).toBeLessThan(9)
     expect(kill).toBeGreaterThanOrEqual(12.5)
     expect(kill).toBeLessThan(14)
+    // the third got the first one's slot when that one hit its time limit, 7.5 s
+    // after it began downloading, less the moment the third link came in
+    const next = jobs.find((l) => l.startsWith('job ok '))!
+    expect(next).toMatch(/^job ok host=www\.youtube\.com .*lane=short ahead=0 /)
+    const wait = Number(/ wait=([\d.]+)/.exec(next)![1])
+    expect(wait).toBeGreaterThan(5)
+    expect(wait).toBeLessThan(9)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a timed-out run leaves nothing in its group, and a pipe holder that left the group doesn't keep the job",
+  async () => {
+    // a minute is 250 ms, so a short video's job has 7.5 s. ffmpegdeaflinger1's
+    // child dies at the SIGTERM and closes yt-dlp's output, but the process it
+    // left in yt-dlp's group ignores SIGTERM and would live 10 s.
+    // escapeffmpeg1's child holds yt-dlp's output for 20 s from a session of
+    // its own, which the signals don't reach: its job ends 5 s after the
+    // SIGTERM all the same
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-deaf-'))
+    const bot = start({ MINUTE_MS: '250', LINGER: dir })
+    let jobs: string[] = []
+    let log: string[] = []
+    try {
+      bot.link(1, 'ffmpegdeaflinger1')
+      bot.link(2, 'escapeffmpeg1')
+      // the second ends at 12.5 s, past the 10 s the lingering process would
+      // live if nothing stopped it
+      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))), 25_000)
+      log = readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8'))
+    } finally {
+      jobs = await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+    // the lingering process got the SIGKILL as its run ended
+    expect(log).toEqual(['up\n'])
+    expect(jobs).toHaveLength(2)
+    for (const line of jobs)
+      expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=short .* dl=\d+\.\d mb=2 total=/)
+    const [deaf, escape] = jobs.map((l) => Number(/ dl=([\d.]+)/.exec(l)![1])).sort((a, b) => a - b)
+    expect(deaf).toBeGreaterThanOrEqual(7.5)
+    expect(deaf).toBeLessThan(9)
+    expect(escape).toBeGreaterThanOrEqual(12.5)
+    expect(escape).toBeLessThan(14)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a download stopped as too large is over 5 s after the stop, even if a pipe holder left yt-dlp's group",
+  async () => {
+    // a minute is 250 ms, so a short video's job has 7.5 s. escapeendless1's
+    // file passes 2000 MB 0.5 s in, and its child holds yt-dlp's output for
+    // 20 s from a session of its own: the job ends 5 s after that stop, well
+    // before its time limit
+    const bot = start({ MINUTE_MS: '250' })
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'escapeendless1')
+      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('😱')), 25_000)
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.statuses(1).map((s) => [...s][0])).toEqual(['⏬', '😱'])
+    expect(bot.statuses(1).at(-1)).toBe(t('en', 'tooBig'))
+    expect(jobs).toHaveLength(1)
+    expect(jobs[0]).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=short .* dl=\d+\.\d mb=2001 total=/)
+    const dl = Number(/ dl=([\d.]+)/.exec(jobs[0]!)![1])
+    expect(dl).toBeGreaterThanOrEqual(5.5)
+    expect(dl).toBeLessThan(7)
   },
   30_000,
 )
@@ -694,12 +796,12 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   "bot: the time limit's signals end with yt-dlp's run",
   async () => {
-    // a minute is 250 ms, so a short video's job has 7.5 s, and the SIGKILL
-    // would come 5 s later. linger1's yt-dlp is done in 0.2 s, and
-    // lingerbroken1's fails then, but each leaves a process in its group that
-    // doesn't hold its output and lives 15 s: once a run is over, whichever
-    // way it ended, neither signal may reach its group (by then the number
-    // could lead another one)
+    // a minute is 250 ms, so a short video's job has 7.5 s. linger1's yt-dlp
+    // is done in 0.2 s, and lingerbroken1's fails then, but each leaves a
+    // process in its group that doesn't hold its output and lives 15 s: once a
+    // run is over, whichever way it ended, neither the time limit's SIGTERM
+    // nor a SIGKILL may reach its group (by then the number could lead
+    // another one)
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
     // each lingering process's log, by its link (a page read again is
     // another run, with a process of its own)

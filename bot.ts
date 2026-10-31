@@ -253,8 +253,9 @@ const update = () =>
 // yt-dlp ran out of time and was stopped
 export class Timeout extends Error {}
 
-// Runs yt-dlp, stopped after timeout ms (a Timeout) or once signal aborts
-// (its reason is thrown, unless yt-dlp still exits 0)
+// Runs yt-dlp, stopped after timeout ms or once signal aborts: then a Timeout
+// or the abort's reason is thrown, unless yt-dlp still exits 0 and its output
+// closes within 5 s of the stop
 async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal) {
   // a failed listen isn't kept: the next download tries again
   proxy ??= egressProxy().catch((e) => {
@@ -286,15 +287,16 @@ async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal
       p.kill(sig)
     }
   }
-  // why the run was stopped, the first time: SIGTERM, and SIGKILL for
-  // whatever is still running 5 s later
+  // why the run was stopped, the first time: SIGTERM, and 5 s later the run
+  // is over, even if something still holds the pipes
   let stopped: Error | undefined
+  const cutoff = Promise.withResolvers<void>()
   const timers: ReturnType<typeof setTimeout>[] = []
   const stop = (why: Error) => {
     if (stopped) return
     stopped = why
     kill('SIGTERM')
-    timers.push(setTimeout(() => kill('SIGKILL'), 5_000))
+    timers.push(setTimeout(cutoff.resolve, 5_000))
   }
   timers.push(
     setTimeout(
@@ -305,15 +307,20 @@ async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal
   const abort = () => stop(signal!.reason)
   signal?.addEventListener('abort', abort)
   try {
-    const [out, err, code] = await Promise.all([
-      new Response(p.stdout).text(),
-      new Response(p.stderr).text(),
-      p.exited,
+    const run = await Promise.race([
+      Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]),
+      cutoff.promise,
     ])
-    if (code && stopped) throw stopped
+    if (!run || (run[2] && stopped)) throw stopped
+    const [out, err, code] = run
     if (code) throw new Error(err.trim().split('\n').pop() || `yt-dlp ${code}`)
     return { out, err }
   } finally {
+    // Then whatever is left of a stopped run's group gets SIGKILL, whether
+    // it holds the pipes or not (a merge's ffmpeg doesn't). While anything is
+    // left no other group can have the number, and since pids are handed out
+    // in turn, neither can one just after the last of it is gone
+    if (stopped) kill('SIGKILL')
     over = true
     signal?.removeEventListener('abort', abort)
     for (const t of timers) clearTimeout(t)
@@ -1119,8 +1126,9 @@ function main() {
       return file
     } finally {
       await saveJar(dir).catch(console.error)
-      // the slot is held until the files are gone
-      await rm(dir, { recursive: true, force: true }).finally(free)
+      // the slot is held until the files are gone; a failed rm is logged, and
+      // the job keeps its own result
+      await rm(dir, { recursive: true, force: true }).catch(console.error).finally(free)
     }
   }
 
