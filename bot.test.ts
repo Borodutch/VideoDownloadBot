@@ -5,6 +5,7 @@ import { Database } from 'bun:sqlite'
 import {
   census,
   answer,
+  biggest,
   claims,
   downloadMinutes,
   Fail,
@@ -648,6 +649,28 @@ test('onDisk: MB of the media files in a job dir, partial ones too', async () =>
     await rm(dir, { recursive: true, force: true })
   }
   expect(await onDisk(dir)).toBe(0)
+})
+
+test("biggest: bytes of a job dir's biggest media file, a merge's too, not their sum", async () => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'job-'))
+  try {
+    expect(await biggest(dir)).toBe(0)
+    // the bot's own files don't count
+    await writeFile(join(dir, 'info.json'), new Uint8Array(5 * 2 ** 20))
+    expect(await biggest(dir)).toBe(0)
+    await writeFile(join(dir, 'v.f137.mp4.part'), new Uint8Array(3 * 2 ** 20))
+    await writeFile(join(dir, 'v.f140.m4a'), new Uint8Array(2 ** 20))
+    expect(await biggest(dir)).toBe(3 * 2 ** 20)
+    // the merged copy, which the parts are on disk next to
+    await writeFile(join(dir, 'v.temp.mp4'), new Uint8Array(4 * 2 ** 20))
+    expect(await biggest(dir)).toBe(4 * 2 ** 20)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+  expect(await biggest(dir)).toBe(0)
 })
 
 test('only cached file_ids skip the document fallback', () => {

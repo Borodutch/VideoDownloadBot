@@ -2,12 +2,14 @@ import { expect, test } from 'bun:test'
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { t } from './i18n'
 
 // The real bot, polling a fake Bot API, with test/yt-dlp standing in for
 // yt-dlp: a link with "long" in it is a 50-minute video that downloads in
 // 3 s, one with "reel" (an Instagram reel) or "stream" in it says nothing of
 // its length, any other is a 30-second one; those download in 0.2 s ("crawl"
-// ones take 9 s, "broken" and "huge" ones fail; test/yt-dlp has the rest).
+// ones take 9 s, "broken" and "huge" ones fail, "endless" ones pass 2000 MB;
+// test/yt-dlp has the rest).
 // MAX_DOWNLOADS=2: one slot for long videos, the other for short ones. env
 // adds to or overrides the bot's environment, delay = how long the fake Bot
 // API takes to answer a call, in ms.
@@ -611,6 +613,51 @@ test.skipIf(skip)(
     const line = (result: string) => jobs.find((l) => l.startsWith(`job ${result} `))
     expect(line('error')).toMatch(/^job error host=www\.youtube\.com .*lane=short ahead=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
     expect(line('fail:tooBig')).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=short ahead=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  'bot: a download stops once one of its files passes 2000 MB, as too large, without reading the page again',
+  async () => {
+    // a minute is 250 ms: the files are weighed every 21 ms, and a long
+    // video's job has 11.25 s. long1 holds the long slot for 3 s, by when
+    // endlessstream2's saved info is stale, so a failed download of it would
+    // read the page again. Its file passes 2000 MB 0.5 s in, and its yt-dlp
+    // would go on for 20 s. It leaves a process in its group that ignores the
+    // stop's SIGTERM and lives 7 s: the SIGKILL 5 s after the stop may not
+    // reach it, as the run is over by then. parts3 has a merge on disk, each
+    // file 2000 MB at most and 4000 MB together, and goes out.
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
+    const log = () => readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8'))
+    const bot = start({ MINUTE_MS: '250', LINGER: dir })
+    let jobs: string[] = []
+    let lingered: string[] = []
+    try {
+      bot.link(1, 'long1')
+      await bot.until(() => bot.statuses(1).length > 0)
+      bot.link(2, 'endlessstream2')
+      bot.link(3, 'parts3')
+      await bot.until(() => bot.videos().length === 2 && bot.statuses(2).some((s) => s.startsWith('😱')))
+      // past the SIGKILL's time
+      for (let i = 0; i < 200 && !log().some((l) => l.includes('done')); i++) await Bun.sleep(50)
+      lingered = log()
+    } finally {
+      jobs = await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+    expect(lingered).toEqual(['up\ndone\n'])
+    expect(bot.videos().map((v) => v.chat).sort()).toEqual([1, 3])
+    expect(bot.statuses(2).map((s) => [...s][0])).toEqual(['⏳', '⏬', '😱'])
+    expect(bot.statuses(2).at(-1)).toBe(t('en', 'tooBig'))
+    expect(jobs).toHaveLength(3)
+    expect(jobs.filter((l) => l.startsWith('job ok '))).toHaveLength(2)
+    const line = jobs.find((l) => l.startsWith('job fail:tooBig '))!
+    expect(line).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=long ahead=0 dur=\? wait=\d+\.\d dl=\d+\.\d mb=2001 total=/)
+    expect(line).not.toContain('reread=')
+    const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
+    expect(dl).toBeGreaterThanOrEqual(0.5)
+    expect(dl).toBeLessThan(3)
   },
   30_000,
 )

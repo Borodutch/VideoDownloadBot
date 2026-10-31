@@ -14,8 +14,17 @@
 // that ignores SIGTERM when "stubborn" is in it too; one with "linger" in it
 // leaves a process in its group that doesn't hold its output and outlives it
 // by 15 s, writing "up", then "done" or "TERM" if it got SIGTERM, to
-// $LINGER/<id>.<its pid>)
-import { copyFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+// $LINGER/<id>.<its pid>; one with "endless" in it, as an HLS stream of
+// unknown size, starts a 20 s child that has its stdout and stderr (as
+// ffmpeg would), has 2 MB, then after 0.5 s 2001 MB (a sparse file), and is
+// done with that file when the child is; with $LINGER set it also leaves a
+// process in its group that ignores SIGTERM, doesn't hold its output and
+// writes "up", then "done" 7 s later, to $LINGER/<id>.<its pid>; one with
+// "parts" in it has a merge on disk for 1 s, 1900 and 100 MB parts and their
+// 2000 MB merged copy, v.temp.mp4 at first and v.mp4 from 0.5 s on, as a
+// merge renames it before the parts go)
+import { copyFileSync, readFileSync, renameSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 const args = process.argv.slice(2)
 if (args.includes('--update-to') || args.includes('--list-extractors')) process.exit(0)
@@ -68,6 +77,37 @@ else {
       env: { ...process.env, V: new URL(url).searchParams.get('v')! },
       stdio: ['ignore', 'ignore', 'ignore'],
     }).unref()
+  // MB on disk without writing them
+  const sparse = (path: string, mb: number) => {
+    writeFileSync(path, '')
+    truncateSync(path, mb * 2 ** 20)
+  }
+  if (url.includes('endless')) {
+    // before the file is too big: a stop would miss a child forked as it comes
+    const child = Bun.spawn(['sleep', '20'], { stdout: 'inherit', stderr: 'inherit' })
+    if (process.env.LINGER)
+      Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; sleep 7; echo done >> "$log"`], {
+        env: { ...process.env, V: new URL(url).searchParams.get('v')! },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      }).unref()
+    writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
+    await Bun.sleep(500)
+    sparse(`${out}.part`, 2001)
+    await child.exited
+    renameSync(`${out}.part`, out)
+    console.log(out)
+    process.exit(0)
+  }
+  if (url.includes('parts')) {
+    const at = (name: string) => join(dirname(out), name)
+    sparse(at('v.f137.mp4'), 1900)
+    sparse(at('v.f140.m4a'), 100)
+    sparse(at('v.temp.mp4'), 2000)
+    await Bun.sleep(500)
+    renameSync(at('v.temp.mp4'), out)
+    await Bun.sleep(500)
+    for (const f of [at('v.f137.mp4'), at('v.f140.m4a'), out]) rmSync(f)
+  }
   if (crawl) writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
   await Bun.sleep(crawl ? 9000 : long ? 3000 : 200)
   if (url.includes('broken')) {

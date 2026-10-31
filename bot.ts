@@ -20,8 +20,9 @@ const DATA = env.DATA_DIR || './data'
 const SCRATCH = scratch(API.includes('api.telegram.org') ? '' : undefined)
 const TMP = SCRATCH.dir
 const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 4)
-// A minute, in ms, of the download time limits and of how old saved info may
-// get (bot.e2e.test.ts shortens it)
+// A minute, in ms, of the download time limits, of how old saved info may get
+// and of how often a download's files are weighed (bot.e2e.test.ts shortens
+// it)
 const MINUTE = Number(env.MINUTE_MS) || 60_000
 // Only formats whose every request goes through the proxy: yt-dlp's own HTTP
 // (HLS, DASH, websockets) and ffmpeg's http(s), which yt-dlp hands the proxy
@@ -252,7 +253,9 @@ const update = () =>
 // yt-dlp ran out of time and was stopped
 export class Timeout extends Error {}
 
-async function ytdlp(args: string[], timeout = 30 * 60_000) {
+// Runs yt-dlp, stopped after timeout ms (a Timeout) or once signal aborts
+// (its reason is thrown, unless yt-dlp still exits 0)
+async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal) {
   // a failed listen isn't kept: the next download tries again
   proxy ??= egressProxy().catch((e) => {
     proxy = undefined
@@ -260,43 +263,59 @@ async function ytdlp(args: string[], timeout = 30 * 60_000) {
   })
   await updating
   const via = await proxy
+  // an abort while it waited (a self-update) won't come again
+  signal?.throwIfAborted()
   // In a process group of its own: yt-dlp hands m3u8 and some HLS downloads
   // to ffmpeg, which inherits its pipes and goes on when yt-dlp alone is
-  // stopped, so the time limit stops the whole group
+  // stopped, so a stop stops the whole group
   const p = Bun.spawn(['yt-dlp', '--proxy', via, ...args], {
     env: { ...proxyFreeEnv(), ...SCRATCH.env },
     stdout: 'pipe',
     stderr: 'pipe',
     detached: true,
   })
-  // the group, or yt-dlp alone if there's no group
-  const kill = (signal: NodeJS.Signals) => {
+  // the group, or yt-dlp alone if there's no group; none once the run is
+  // over, whatever timer or abort comes late (its number could lead another
+  // group by then)
+  let over = false
+  const kill = (sig: NodeJS.Signals) => {
+    if (over) return
     try {
-      process.kill(-p.pid, signal)
+      process.kill(-p.pid, sig)
     } catch {
-      p.kill(signal)
+      p.kill(sig)
     }
   }
-  let late = false
-  const timers = [
-    setTimeout(() => {
-      late = true
-      kill('SIGTERM')
-    }, timeout),
-    // for whatever is still running 5 s later
-    setTimeout(() => kill('SIGKILL'), timeout + 5_000),
-  ]
+  // why the run was stopped, the first time: SIGTERM, and SIGKILL for
+  // whatever is still running 5 s later
+  let stopped: Error | undefined
+  const timers: ReturnType<typeof setTimeout>[] = []
+  const stop = (why: Error) => {
+    if (stopped) return
+    stopped = why
+    kill('SIGTERM')
+    timers.push(setTimeout(() => kill('SIGKILL'), 5_000))
+  }
+  timers.push(
+    setTimeout(
+      () => stop(new Timeout(`yt-dlp timed out after ${+(timeout / 60_000).toFixed(1)} min`)),
+      timeout,
+    ),
+  )
+  const abort = () => stop(signal!.reason)
+  signal?.addEventListener('abort', abort)
   try {
     const [out, err, code] = await Promise.all([
       new Response(p.stdout).text(),
       new Response(p.stderr).text(),
       p.exited,
     ])
-    if (code && late)
-      throw new Timeout(`yt-dlp timed out after ${+(timeout / 60_000).toFixed(1)} min`)
+    if (code && stopped) throw stopped
     if (code) throw new Error(err.trim().split('\n').pop() || `yt-dlp ${code}`)
     return { out, err }
   } finally {
+    over = true
+    signal?.removeEventListener('abort', abort)
     for (const t of timers) clearTimeout(t)
   }
 }
@@ -754,15 +773,28 @@ const esc = (s: string) =>
 // Seconds since t, for the job log
 const elapsed = (t: number) => ((Date.now() - t) / 1000).toFixed(1)
 
-// MB of media in a job's dir, downloaded so far or done (yt-dlp names it all
-// v.*), not counting the v.temp.* a merge or fixup writes from the rest
+// The media in a job's dir, downloaded so far or done (yt-dlp names it all
+// v.*): each file's name and bytes
+async function media(dir: string) {
+  const files: { name: string; bytes: number }[] = []
+  for (const name of await readdir(dir).catch(() => []))
+    if (name.startsWith('v.'))
+      files.push({ name, bytes: (await stat(join(dir, name)).catch(() => undefined))?.size ?? 0 })
+  return files
+}
+
+// MB of media in a job's dir, not counting the v.temp.* a merge or fixup
+// writes from the rest
 export async function onDisk(dir: string) {
   let bytes = 0
-  for (const f of await readdir(dir).catch(() => []))
-    if (f.startsWith('v.') && !f.startsWith('v.temp.'))
-      bytes += (await stat(join(dir, f)).catch(() => undefined))?.size ?? 0
+  for (const f of await media(dir)) if (!f.name.startsWith('v.temp.')) bytes += f.bytes
   return Math.round(bytes / 2 ** 20)
 }
+
+// Bytes of the biggest media file in a job's dir, a merge's or fixup's
+// v.temp.* too (it becomes the video)
+export const biggest = async (dir: string) =>
+  (await media(dir)).reduce((max, f) => Math.max(max, f.bytes), 0)
 
 // How a job that threw e ends in the job log: fail:<what the chat was told>,
 // timeout (the download ran out of time) or error
@@ -976,6 +1008,20 @@ function main() {
 
       await status('downloading')
       await Bun.write(join(dir, 'info.json'), json)
+      // yt-dlp holds a download to --max-filesize only by its Content-Length,
+      // so an HLS or DASH one of unknown size (a stream recording) would grow
+      // until the time limit, many GB into TMP. Every 5 s the job's files are
+      // weighed, and once one of them is over LIMIT the download stops: that
+      // file alone can't be sent. (Their sum would stop a merge that's fine:
+      // the parts and the merged copy are on disk together.) It's the
+      // download as it comes that's judged, as by --max-filesize: an MPEG-TS
+      // one just over LIMIT, which the remux into MP4 would shrink a few %
+      // under it, stops too.
+      const big = new AbortController()
+      const weigh = setInterval(async () => {
+        if ((await biggest(dir)) > LIMIT)
+          big.abort(new Fail('tooBig', `a file over ${LIMIT >> 20} MB`))
+      }, MINUTE / 12)
       const grab = (source: string[], timeout: number) =>
         ytdlp(
           [
@@ -986,6 +1032,7 @@ function main() {
             '--print', 'after_move:filepath',
           ],
           timeout,
+          big.signal,
         )
       const fetched = Date.now()
       const age = fetched - extracted
@@ -1000,6 +1047,8 @@ function main() {
         budget,
       )
         .catch((e) => {
+          // too big: the page read again has the same video
+          if (big.signal.aborted) throw big.signal.reason
           const left = budget - (Date.now() - fetched)
           if (!reread(age, left)) throw e
           log.reread = 1
@@ -1011,6 +1060,7 @@ function main() {
           log.mb = await onDisk(dir)
           throw e
         })
+        .finally(() => clearInterval(weigh))
       log.dl = elapsed(fetched)
       const path = out.trim().split('\n').pop()
       // --print implies --quiet, so a file over --max-filesize is skipped
