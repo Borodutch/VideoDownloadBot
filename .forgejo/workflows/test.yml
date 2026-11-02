@@ -44,4 +44,6 @@ jobs:
           chmod +x bin/yt-dlp
           echo "$PWD/bin" >> "$GITHUB_PATH"
       - run: bunx -p typescript tsc
-      - run: bun test
+      # e2e tests each run their own bot, so they go concurrently (test.concurrent); 10 at once keeps their deploy
+      # timing windows honest on a shared Mac runner, and the files run in parallel workers
+      - run: bun test --parallel --max-concurrency=10

@@ -168,7 +168,7 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
 
 const skip = !Bun.which('ffmpeg') && !process.env.CI
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a short link goes out while long ones download, and a queued one says so',
   async () => {
     const bot = start()
@@ -209,7 +209,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: an Instagram reel, which doesn't say how long it is, goes out while three long videos download; a stream that doesn't waits",
   async () => {
     // four slots, three for long videos
@@ -241,7 +241,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: by default eight slots, seven for long videos, one user's long ones six; the job line counts the user's own jobs that have a slot or wait for one",
   async () => {
     // An empty MAX_DOWNLOADS is read as unset, so this runs the default;
@@ -286,7 +286,7 @@ test.skipIf(skip)(
   60_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a request for a link still in yt-dlp -J hears that it is queued when the job is',
   async () => {
     const bot = start()
@@ -319,7 +319,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a request for a link that is already downloading hears so, then that it is uploading',
   async () => {
     const bot = start()
@@ -340,7 +340,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, jobs still running near the exit tell their chats to send the link again',
   async () => {
     // the exit comes 1 s after the drain starts, the notice at once
@@ -365,7 +365,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, a short link whose yt-dlp -J ends meanwhile still goes out when a slot is free',
   async () => {
     const bot = start()
@@ -385,7 +385,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, a link still in the queue hears to send it again; the running one finishes',
   async () => {
     const bot = start()
@@ -393,7 +393,9 @@ test.skipIf(skip)(
     try {
       bot.link(1, 'long1')
       bot.link(1, 'long2')
-      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('⏳')))
+      // long2's ⏳ may come from its wait for a yt-dlp -J turn, before long1 has its slot
+      const has = (icon: string) => bot.statuses(1).some((s) => s.startsWith(icon))
+      await bot.until(() => has('⏳') && has('⏬'))
     } finally {
       jobs = await bot.stop()
     }
@@ -405,7 +407,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, links waiting for or in yt-dlp -J hear to send them again, after the queued status of the waiting one',
   async () => {
     const bot = start()
@@ -436,7 +438,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a queued link to a video that another link has sent meanwhile gets the cached file',
   async () => {
     const bot = start()
@@ -460,7 +462,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a link waiting for a yt-dlp -J turn hears it is queued',
   async () => {
     const bot = start()
@@ -482,13 +484,16 @@ test.skipIf(skip)(
       jobs = await bot.stop()
     }
     expect(bot.statuses(2).map((s) => s[0])).toEqual(['⏳', '⏬', '⏫'])
-    for (const chat of [1, 3]) expect(bot.statuses(chat).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    // neither waited for a -J turn (checked above); one may wait for the one
+    // short download slot when their -J runs end a moment apart (a busy runner)
+    for (const chat of [1, 3])
+      expect(bot.statuses(chat).map((s) => s[0]).filter((s) => s !== '⏳')).toEqual(['⏬', '⏫'])
     expect(jobs.filter((l) => /^job ok .*metaq=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
   },
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a tweet without a video that waited for a yt-dlp -J turn has its queued status removed, a second request too',
   async () => {
     const bot = start()
@@ -521,7 +526,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: on a deploy, a failure message still on its way isn't turned into the exit notice",
   async () => {
     // the failure reply takes 700 ms; the exit notice would come at once
@@ -537,7 +542,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: on a deploy, a cached video on its way doesn't keep the exit notice next to it",
   async () => {
     // the cached resend takes 500 ms, the exit notice 900 ms
@@ -562,7 +567,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, a job whose upload has begun keeps its status; a request following it hears to send the link again',
   async () => {
     // chat 1's upload takes 1.5 s, past the exit
@@ -590,7 +595,7 @@ test.skipIf(skip)(
 // download and up to its upload between the two.
 const slow = (status: string) => (c: Call) => (c.text?.startsWith(status) ? 1800 : 0)
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, a download that ends after the cut hears to send the link again and is not uploaded',
   async () => {
     const bot = start({ DRAIN_MS: '3000' }, slow('⏬'))
@@ -609,7 +614,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, a job at "⏫" whose upload has not begun by the cut hears to send the link again',
   async () => {
     const bot = start({ DRAIN_MS: '3000' }, slow('⏫'))
@@ -628,12 +633,12 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, a job at "⏫" still probing its file at the exit hears to send the link again',
   async () => {
-    // an ffprobe that takes 4 s, past the exit
+    // an ffprobe that takes 10 s, well past the exit (nothing waits for it)
     const bin = mkdtempSync(join(tmpdir(), 'bot-e2e-bin-'))
-    writeFileSync(join(bin, 'ffprobe'), `#!/bin/sh\nsleep 4\nexec ${Bun.which('ffprobe')} "$@"\n`)
+    writeFileSync(join(bin, 'ffprobe'), `#!/bin/sh\nsleep 10\nexec ${Bun.which('ffprobe')} "$@"\n`)
     chmodSync(join(bin, 'ffprobe'), 0o755)
     const bot = start({ DRAIN_MS: '3000', PATH: `${bin}:${join(import.meta.dir, 'test')}:${process.env.PATH}` })
     let jobs: string[] = []
@@ -652,7 +657,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: on a deploy, a guest reply whose download ends after the cut hears to send the link again',
   async () => {
     const bot = start({ DRAIN_MS: '3000', STORAGE_CHAT: '9' }, slow('⏬'))
@@ -672,7 +677,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a failed download logs how long it ran and the MB it got',
   async () => {
     const bot = start()
@@ -695,7 +700,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a download stops once one of its files passes 2000 MB, as too large, without reading the page again',
   async () => {
     // a minute is 250 ms: the files are weighed every 21 ms, and a long
@@ -740,7 +745,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: the time limit also stops a child of yt-dlp that holds its output, as ffmpeg does, and frees the slot',
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s, and the child
@@ -807,7 +812,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: a timed-out run leaves nothing in its group, and a pipe holder that left the group doesn't keep the job",
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s. ffmpegdeaflinger1's
@@ -845,7 +850,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: a download stopped as too large is over 5 s after the stop, even if a pipe holder left yt-dlp's group",
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s. escapeendless1's
@@ -871,7 +876,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: the time limit's signals end with yt-dlp's run",
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s. linger1's yt-dlp
@@ -908,7 +913,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: a long video's download goes on past the time a short one gets",
   async () => {
     // a minute of download time is 250 ms: 7.5 s for a short video, 11.25 s
@@ -939,7 +944,7 @@ test.skipIf(skip)(
   40_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a page read again gets only the time the job has left',
   async () => {
     // a minute is 250 ms, so a long video's job has 11.25 s, and
@@ -970,7 +975,7 @@ test.skipIf(skip)(
   45_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a page read again goes on from the failed download only in the format that got it',
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -1030,7 +1035,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: a page read again that doesn't answer in the time the job has left stops with it",
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s, and
@@ -1064,7 +1069,7 @@ test.skipIf(skip)(
 // The sent videos and audio files
 const files = (calls: Call[]) => calls.filter((c) => /^send(Video|Audio)$/.test(c.method))
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: a page read again that picks another video sends that one as itself, cached under its own id, not the first one's",
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -1116,7 +1121,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   "bot: a post with several videos whose first one has changed when read again sends the new one, downloaded from its own info, not the post's",
   async () => {
     // As above, with old1 a post with several videos, whose -J is a playlist
@@ -1158,7 +1163,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a page read again that picks a live stream, or a video too big to send, says so',
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -1186,7 +1191,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+test.concurrent.skipIf(skip)(
   'bot: a refresh of an unsized video goes on only while the page picks that video, at the first read or when read again',
   async () => {
     // old1, old2 and old3 have copies cached under their links and ids
