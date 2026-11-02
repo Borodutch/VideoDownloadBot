@@ -1174,18 +1174,28 @@ test.skipIf(!(Bun.which('ffmpeg') || process.env.CI))('probe and thumbnail: disp
     const rot = join(dir, 'rot.mp4')
     // one frame: a probe needs no more
     await run(['-f', 'lavfi', '-i', 'testsrc=s=1080x1440:d=1', '-frames:v', '1', '-vf', 'setsar=64/27', '-c:v', 'mpeg4', flat])
-    // -display_rotation came with ffmpeg 6 (Debian bookworm has 5.1)
-    const rotates = Bun.spawnSync(['ffmpeg', '-hide_banner', '-h', 'full']).stdout.toString().includes('display_rotation')
-    if (rotates) await run(['-display_rotation', '90', '-i', flat, '-c', 'copy', rot])
+    // -display_rotation came with ffmpeg 6 (Debian bookworm has 5.1): an
+    // ffmpeg that doesn't know it makes no rotated file. (Not asked with a
+    // spawnSync of `ffmpeg -h full`: that held up every test in this file.)
+    const rotates = await run(['-display_rotation', '90', '-i', flat, '-c', 'copy', rot]).then(
+      () => true,
+      (e: Error) => {
+        if (!/display_rotation/.test(e.message)) throw e
+        return false
+      },
+    )
     expect(await probe(flat)).toEqual({ width: 2560, height: 1440 })
     if (rotates) expect(await probe(rot)).toEqual({ width: 1440, height: 2560 })
     expect(await probe(join(dir, 'missing.mp4'))).toBeUndefined()
     const cases = [[flat, { width: 320, height: 180 }], [rot, { width: 180, height: 320 }]] as const
-    for (const [file, size] of rotates ? cases : cases.slice(0, 1)) {
-      const thumb = join(dir, 'thumb.jpg')
-      await run(['-i', file, '-frames:v', '1', '-vf', THUMB, thumb])
-      expect(await probe(thumb)).toEqual(size)
-    }
+    // both thumbnails at once
+    await Promise.all(
+      (rotates ? cases : cases.slice(0, 1)).map(async ([file, size], i) => {
+        const thumb = join(dir, `thumb${i}.jpg`)
+        await run(['-i', file, '-frames:v', '1', '-vf', THUMB, thumb])
+        expect(await probe(thumb)).toEqual(size)
+      }),
+    )
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

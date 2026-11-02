@@ -12,7 +12,7 @@ concurrency:
 jobs:
   test:
     # Our own PRs and pushes run on the Mac runners; outsiders' PRs (AGit via the github bot) stay on Linux
-    runs-on: ${{ (github.event_name != 'pull_request' || contains(fromJSON('["backmeupplz","renovate","claude"]'), github.event.pull_request.user.login)) && 'macos-latest' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || contains(fromJSON('["backmeupplz","renovate","claude","radiant"]'), github.event.pull_request.user.login)) && 'macos-latest' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: https://github.com/oven-sh/setup-bun@v2
