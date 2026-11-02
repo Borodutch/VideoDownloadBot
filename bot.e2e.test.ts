@@ -202,9 +202,9 @@ test.skipIf(skip)(
     }
     expect(jobs).toHaveLength(3)
     expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=long/.test(l))).toHaveLength(2)
-    expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 dur=30 wait=0\.0 /.test(l))).toHaveLength(1)
-    // the second long one waited for the first
-    expect(jobs.some((l) => /lane=long ahead=0 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toBe(true)
+    expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 own=0 dur=30 wait=0\.0 /.test(l))).toHaveLength(1)
+    // the second long one waited for the first, its user's own
+    expect(jobs.some((l) => /lane=long ahead=0 own=1 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toBe(true)
   },
   30_000,
 )
@@ -212,7 +212,7 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   "bot: an Instagram reel, which doesn't say how long it is, goes out while three long videos download; a stream that doesn't waits",
   async () => {
-    // the default four slots, three for long videos
+    // four slots, three for long videos
     const bot = start({ MAX_DOWNLOADS: '4' })
     let jobs: string[] = []
     const downloading = (chat: number) => bot.statuses(chat).filter((s) => s.startsWith('⏬')).length
@@ -233,11 +233,57 @@ test.skipIf(skip)(
     expect(bot.statuses(3).map((s) => s[0])).toEqual(['⏬', '⏫'])
     expect(bot.statuses(4).map((s) => s[0])).toEqual(['⏳', '⏬', '⏫'])
     expect(jobs).toHaveLength(5)
-    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 dur=3000 wait=0\.0 /.test(l))).toHaveLength(3)
-    expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 dur=\? wait=0\.0 /.test(l))).toHaveLength(1)
-    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 dur=\? wait=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
+    // (user 1's second long one may ask while their first has a slot)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 own=[01] dur=3000 wait=0\.0 /.test(l))).toHaveLength(3)
+    expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 own=0 dur=\? wait=0\.0 /.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 own=0 dur=\? wait=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
   },
   30_000,
+)
+
+test.skipIf(skip)(
+  "bot: by default eight slots, seven for long videos, one user's long ones six; the job line counts the user's own jobs that have a slot or wait for one",
+  async () => {
+    // An empty MAX_DOWNLOADS is read as unset, so this runs the default;
+    // "longcrawl" links are long videos that download in 9 s, "long" ones in 3 s
+    const bot = start({ MAX_DOWNLOADS: '' })
+    let jobs: string[] = []
+    const downloading = (chat: number) => bot.statuses(chat).filter((s) => s.startsWith('⏬')).length
+    try {
+      // user 1's six long links download at once...
+      for (let i = 1; i <= 6; i++) bot.link(1, `longcrawl1x${i}`)
+      await bot.until(() => downloading(1) === 6)
+      // ...and their seventh waits for one of them
+      bot.link(1, 'long1x7')
+      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('⏳')))
+      // user 2's long link takes the seventh long slot
+      bot.link(2, 'longcrawl2')
+      await bot.until(() => downloading(2) === 1)
+      // user 3's waits for a long slot, and a short link takes the eighth slot
+      bot.link(3, 'long3')
+      bot.link(4, 'short4')
+      await bot.until(() => bot.statuses(3).some((s) => s.startsWith('⏳')))
+      // user 1's eighth comes after their seventh, still in line, and user 3's
+      bot.link(1, 'long1x8')
+      await bot.until(() => bot.videos().length === 11, 30_000)
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.statuses(2).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(bot.statuses(3).map((s) => s[0])).toEqual(['⏳', '⏬', '⏫'])
+    expect(bot.statuses(4).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(jobs).toHaveLength(11)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 own=[0-5] dur=3000 wait=0\.0 /.test(l))).toHaveLength(6)
+    // user 1's seventh waited behind their own six and their eighth behind
+    // those and the seventh, user 3's behind others' while user 1's seventh
+    // was in line, and user 2's didn't wait for that
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 own=6 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=2 own=7 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=1 own=0 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok .*lane=long ahead=1 own=0 dur=3000 wait=0\.0 /.test(l))).toHaveLength(1)
+    expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 own=0 dur=30 wait=0\.0 /.test(l))).toHaveLength(1)
+  },
+  60_000,
 )
 
 test.skipIf(skip)(
@@ -643,8 +689,8 @@ test.skipIf(skip)(
     for (const chat of [1, 2]) expect(bot.statuses(chat).map((s) => [...s][0])).toEqual(['⏬', '😱'])
     expect(jobs).toHaveLength(2)
     const line = (result: string) => jobs.find((l) => l.startsWith(`job ${result} `))
-    expect(line('error')).toMatch(/^job error host=www\.youtube\.com .*lane=short ahead=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
-    expect(line('fail:tooBig')).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=short ahead=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
+    expect(line('error')).toMatch(/^job error host=www\.youtube\.com .*lane=short ahead=0 own=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
+    expect(line('fail:tooBig')).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=short ahead=0 own=0 dur=30 wait=0\.0 dl=\d+\.\d mb=3 total=/)
   },
   30_000,
 )
@@ -685,7 +731,7 @@ test.skipIf(skip)(
     expect(jobs).toHaveLength(3)
     expect(jobs.filter((l) => l.startsWith('job ok '))).toHaveLength(2)
     const line = jobs.find((l) => l.startsWith('job fail:tooBig '))!
-    expect(line).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=long ahead=0 dur=\? wait=\d+\.\d dl=\d+\.\d mb=2001 total=/)
+    expect(line).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=long ahead=0 own=0 dur=\? wait=\d+\.\d dl=\d+\.\d mb=2001 total=/)
     expect(line).not.toContain('reread=')
     const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
     expect(dl).toBeGreaterThanOrEqual(0.5)

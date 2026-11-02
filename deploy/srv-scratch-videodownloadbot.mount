@@ -8,8 +8,11 @@ Before=docker.service
 What=tmpfs
 Where=/srv/scratch/videodownloadbot
 Type=tmpfs
-# Not noexec: the yt-dlp release binary unpacks and loads its libraries here
-Options=size=64G,mode=1777,nosuid,nodev
+# Not noexec: the yt-dlp release binary unpacks and loads its libraries here. 128G holds the README's
+# 2 x (7 long slots x 8 + 4) GB for MAX_DOWNLOADS=8 (#395); a tmpfs takes RAM only for what's in it, and the
+# host has 251 GB, about 42 GB of it in use at most. A running mount grows with `systemctl reload` after
+# `systemctl daemon-reload`, which remounts it with these options; its files stay.
+Options=size=128G,mode=1777,nosuid,nodev
 
 [Install]
 WantedBy=local-fs.target

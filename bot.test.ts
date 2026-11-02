@@ -471,7 +471,7 @@ test('limit: long fns leave a turn for short ones', async () => {
 })
 
 test("limit: a long fn in line holds nothing, so one user's long links don't hold up another's", async () => {
-  // the default: four turns, three for long ones
+  // four turns, three for long ones
   const slots = limit(4, 3)
   const j = jobs()
   const go = lane(slots, j)
@@ -492,7 +492,7 @@ test("limit: a long fn in line holds nothing, so one user's long links don't hol
 })
 
 test("limit: one user's burst leaves the others a turn, long ones too", async () => {
-  // the default: four turns, three for long ones
+  // four turns, three for long ones
   const slots = limit(4, 3)
   const j = jobs()
   const go = lane(slots, j)
@@ -536,6 +536,45 @@ test("limit: one user's burst leaves the others a turn, long ones too", async ()
   await check.take()
   await check.take()
   expect(check.busy()).toBe(true)
+})
+
+test("limit: own counts a user's fns that have a turn or wait in line for one, long or short", async () => {
+  // eight turns, seven for long ones, as by default: one user's long ones get
+  // six of them, and all their fns seven
+  const slots = limit(8, 7)
+  const j = jobs()
+  const go = lane(slots, j)
+  for (let i = 1; i <= 7; i++) go(`a${i}`, true, 'a')
+  go('a8', false, 'a')
+  go('b1', true, 'b')
+  await Bun.sleep(0)
+  // a's seventh long one waits for one of its own, though a long turn is free
+  // for b's
+  expect(j.started).toEqual(['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a8', 'b1'])
+  expect([slots.own('a'), slots.own('b'), slots.own('c')]).toEqual([8, 1, 0])
+  expect(slots.waiting(true)).toBe(1)
+  // every turn is taken: c's long one waits behind other users' fns
+  go('c1', true, 'c')
+  await Bun.sleep(0)
+  expect([slots.own('c'), slots.waiting(true)]).toEqual([1, 2])
+  // b's ending lets c's in, not a's, which has its part
+  await j.finish('b1')
+  expect(j.started.slice(8)).toEqual(['c1'])
+  expect([slots.own('a'), slots.own('b'), slots.own('c')]).toEqual([8, 0, 1])
+  // a's short one ending frees a turn for a short one only: long ones have
+  // all seven of theirs
+  await j.finish('a8')
+  expect(j.started.slice(9)).toEqual([])
+  // a's long one ending lets its seventh in
+  await j.finish('a1')
+  expect(j.started.slice(9)).toEqual(['a7'])
+  expect([slots.own('a'), slots.waiting(true)]).toEqual([6, 0])
+  // fns without a user share no part, and count none
+  const anyone = limit(2)
+  await anyone.take()
+  void anyone.take()
+  void anyone.take()
+  expect([anyone.busy(), anyone.waiting(), anyone.own(undefined)]).toEqual([true, 1, 0])
 })
 
 test('isLong: over 10 minutes; of unknown length too, unless from Instagram or X or 100 MB at most', () => {

@@ -19,7 +19,13 @@ const DATA = env.DATA_DIR || './data'
 // file:// paths only work with a local Bot API server
 const SCRATCH = scratch(API.includes('api.telegram.org') ? '' : undefined)
 const TMP = SCRATCH.dir
-const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 4)
+// Videos downloaded and sent at once (slots), long ones in up to 7 of them by
+// default. With 4 (3 for long ones), the 3 long slots were all busy for
+// 88-96% of a day's busiest 6 hours, and long videos waited up to about 3
+// hours for one (#395). The sites that fill them, adult CDNs at 0.1-1.3 MB/s,
+// are slow per connection (Eporner kept its speed in 5 downloads at once,
+// #298), so more at once get more done.
+const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 8)
 // A minute, in ms, of the download time limits, of how old saved info may get
 // and of how often a download's files are weighed (bot.e2e.test.ts shortens
 // it)
@@ -455,10 +461,16 @@ export function limit(max: number, maxLong = max) {
     // whether a new fn of who's would have to wait (once closed, it fails or
     // starts at once)
     busy: (isLong = false, who?: unknown) => !closed && !fits(who, isLong),
-    // the fns in line a new one would wait behind: long ones only count for
-    // a short one while they could have a turn
+    // the fns in line when a new one asks, other users' that wait only for
+    // their own part included: long ones only count for a short one while
+    // they could have a turn
     waiting: (isLong = false) =>
       queue.filter((w) => isLong || !w.long || long < maxLong).length,
+    // How many of who's fns, long or short, have a turn or wait in line for
+    // one: with none, a new fn of theirs that has to wait waits for other
+    // users' fns alone. Fns without a who share no part and count none.
+    own: (who: unknown) =>
+      who === undefined ? 0 : mine(who).all + queue.filter((w) => w.who === who).length,
     // Fails the fns still waiting with e, and later ones that would have to
     // wait or are long (a restart has time for a short one); running ones go on
     close(e: Error) {
@@ -986,9 +998,11 @@ function main() {
     if (dest.reply)
       void bot.api.sendChatAction(dest.chat, 'upload_video').catch(() => {})
     // One line per job, for where the time goes (in seconds): the wait for a
-    // yt-dlp -J turn and the run, the wait for a slot and how many jobs were
-    // ahead, the download (a failed one too, with the MB it got), and probe,
-    // thumbnail and upload together
+    // yt-dlp -J turn and the run, the wait for a slot, how many jobs were
+    // in line and how many of the user's own had a slot or were in line
+    // (with none, a wait was behind other people's links alone), the
+    // download (a failed one too, with the MB it got), and probe, thumbnail
+    // and upload together
     const log: Record<string, string | number> = { host: new URL(url).hostname }
     const start = Date.now()
     let result = 'ok'
@@ -1092,6 +1106,7 @@ function main() {
       const long = isLong(v)
       log.lane = long ? 'long' : 'short'
       log.ahead = slots.waiting(long)
+      log.own = slots.own(dest.who)
       log.dur = v.duration ? Math.round(v.duration) : '?'
       await wait(slots.busy(long, dest.who))
       const waited = Date.now()
