@@ -707,6 +707,28 @@ export async function progress(flooded: boolean, show: (signal: Signal) => Promi
   })
 }
 
+// Deletes a message the bot sent to STORAGE (a guest upload sits in the
+// admin's DM until then): through a flood wait floodWait gives up on (over
+// its max) and network or server errors, tries times in all. What it still
+// can't delete is logged, not thrown. pause is Bun.sleep but in tests.
+export async function unsend(
+  del: () => Promise<unknown>,
+  tries = 6,
+  pause: (ms: number) => Promise<unknown> = Bun.sleep,
+) {
+  for (let i = 1; ; i++) {
+    try {
+      return void (await del())
+    } catch (e) {
+      const g = e instanceof GrammyError ? e : undefined
+      if ((g && g.error_code !== 429 && g.error_code < 500) || i >= tries)
+        return console.error('delete failed', (e as Error).message)
+      console.error('delete retry', i, (e as Error).message)
+      await pause((g?.parameters.retry_after ?? 5 * 2 ** i) * 1000)
+    }
+  }
+}
+
 // Sends a file to dest.chat as kind; returns the kind it went as, its file_id
 // and the message
 export const sender = (api: Api) =>
@@ -1330,7 +1352,8 @@ function main() {
     try {
       const f = await download(dest, url, async () => {})
       swap(old.file_id, f)
-      await bot.api.deleteMessage(dest.chat, dest.stale!.message).catch(() => {})
+      const stale = dest.stale!.message
+      void unsend(() => bot.api.deleteMessage(dest.chat, stale))
       return f
     } catch (e) {
       console.error('refresh failed', url, (e as Error).message)
@@ -1474,8 +1497,9 @@ function main() {
       console.error('guest failed', url, (e as Error).message)
       await status((e instanceof Fail && e.key) || 'failed')
     } finally {
-      if (dest.sent)
-        await bot.api.deleteMessage(dest.chat, dest.sent).catch(() => {})
+      // detached: a long flood wait mustn't hold the handler (and a deploy's drain)
+      const sent = dest.sent
+      if (sent) void unsend(() => bot.api.deleteMessage(dest.chat, sent))
     }
   }
 

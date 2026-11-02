@@ -34,6 +34,7 @@ import {
   THUMB,
   Timeout,
   unready,
+  unsend,
   unstarted,
   urls,
   videos,
@@ -1186,5 +1187,31 @@ test.skipIf(!(Bun.which('ffmpeg') || process.env.CI))('probe and thumbnail: disp
     }
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('unsend: a delete outlasts a long flood wait and server errors, gives up on other errors', async () => {
+  const waits: number[] = []
+  const pause = async (ms: number) => void waits.push(ms)
+  // floodWait gave up on a 300 s wait, then a 502, then it goes through
+  const fake = fakeApi((_, n) => (n === 1 ? flood(300) : n === 2 ? { ok: false, error_code: 502, description: 'Bad Gateway' } : { ok: true, result: true }))
+  try {
+    await unsend(() => fake.api.deleteMessage(1, 2), 6, pause)
+    expect(fake.methods()).toEqual(['deleteMessage', 'deleteMessage', 'deleteMessage'])
+    expect(waits).toEqual([300_000, 20_000])
+  } finally {
+    fake.stop()
+  }
+  // a message that's gone or can't be deleted isn't tried again, nor past tries
+  const gone = fakeApi(() => ({ ok: false, error_code: 400, description: 'Bad Request: message to delete not found' }))
+  const busy = fakeApi(() => flood(300))
+  try {
+    await unsend(() => gone.api.deleteMessage(1, 2), 6, pause)
+    expect(gone.methods()).toEqual(['deleteMessage'])
+    await unsend(() => busy.api.deleteMessage(1, 2), 3, pause)
+    expect(busy.methods().length).toBe(3)
+  } finally {
+    gone.stop()
+    busy.stop()
   }
 })
