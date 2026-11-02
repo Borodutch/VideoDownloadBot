@@ -1,0 +1,4 @@
+[test]
+# Their tests share no state (each e2e one runs its own bot, each egress one its own
+# servers), so they run at once
+concurrentTestGlob = "**/{bot,egress}*.test.ts"

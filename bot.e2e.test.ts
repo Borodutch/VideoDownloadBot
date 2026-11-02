@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite'
-import { expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { afterAll, expect, test } from 'bun:test'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { t } from './i18n'
@@ -13,7 +13,7 @@ import { t } from './i18n'
 // test/yt-dlp has the rest).
 // MAX_DOWNLOADS=2: one slot for long videos, the other for short ones. env
 // adds to or overrides the bot's environment, delay = how long the fake Bot
-// API takes to answer a call, in ms.
+// API takes to answer a call, in ms, or what it waits for (a gate()).
 type Call = {
   method: string
   chat: number
@@ -26,10 +26,18 @@ type Call = {
   performer?: string
   duration?: number
 }
-function start(env: Record<string, string> = {}, delay: (call: Call) => number = () => 0) {
-  const work = mkdtempSync(join(tmpdir(), 'bot-e2e-'))
-  const mp4 = join(work, 'v.mp4')
+// The video every fake download copies (FAKE_MP4), made once: an ffmpeg run
+// per test, in spawnSync, would hold up all the concurrent ones (0.4 s each)
+const fixture = mkdtempSync(join(tmpdir(), 'bot-e2e-mp4-'))
+const mp4 = join(fixture, 'v.mp4')
+if (Bun.which('ffmpeg'))
   Bun.spawnSync(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=s=320x240:d=1', '-pix_fmt', 'yuv420p', mp4])
+afterAll(() => rmSync(fixture, { recursive: true, force: true }))
+
+function start(env: Record<string, string> = {}, delay: (call: Call) => number | Promise<unknown> = () => 0) {
+  const work = mkdtempSync(join(tmpdir(), 'bot-e2e-'))
+  const gates = join(work, 'gates')
+  mkdirSync(gates)
   // upload = a file sent, not a file_id
   const calls: Call[] = []
   const updates: { update_id: number }[] = []
@@ -72,7 +80,8 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
       }
       calls.push(call)
       const ms = delay(call)
-      if (ms) await Bun.sleep(ms)
+      if (typeof ms !== 'number') await ms
+      else if (ms) await Bun.sleep(ms)
       if (method === 'answerGuestQuery') return ok({ inline_message_id: `g${++id}` })
       if (method === 'sendMessage') return ok({ message_id: ++id, date: 0, chat, text: body.text })
       // cached file_ids "unsized…" went out without a size, as before #281
@@ -109,12 +118,23 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
       HANDOVER_LOCK: '',
       PROMO_TOKEN: '',
       FAKE_MP4: mp4,
+      GATES: gates,
       ...env,
     },
     stdout: 'pipe',
     stderr: 'ignore',
   })
-  const out = new Response(bot.stdout).text()
+  // the bot's stdout lines so far
+  const lines: string[] = []
+  let termed = false
+  const reading = (async () => {
+    let rest = ''
+    for await (const chunk of bot.stdout.pipeThrough(new TextDecoderStream())) {
+      const parts = (rest + chunk).split('\n')
+      rest = parts.pop()!
+      lines.push(...parts)
+    }
+  })()
   // a message from user with a link to video v (and whatever else follows
   // it in the query)
   const message = (user: number, v: string) => {
@@ -153,22 +173,68 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number =
     // the status texts a chat got, sent or edited
     statuses: (chat: number) =>
       calls.filter((c) => c.chat === chat && /^(sendMessage|editMessageText)$/.test(c.method)).map((c) => c.text!),
-    // SIGTERM, as on a deploy; resolves to the bot's job log lines
-    async stop() {
+    // whether a "jhold" link's -J or a "dhold" link's download is held, and
+    // lets it go on (test/yt-dlp)
+    held: (v: string, what: 'J' | 'dl') => existsSync(join(gates, `${v}.${what}.held`)),
+    release(v: string, what: 'J' | 'dl') {
+      writeFileSync(join(gates, `${v}.${what}`), '')
+    },
+    // a deploy's SIGTERM; resolves once the drain has begun, and with
+    // CUT_MS=0 (DEPLOY) once it has cut
+    async term() {
+      termed = true
       bot.kill('SIGTERM')
+      const said = (word: string) => lines.some((l) => l.startsWith(word))
+      await this.until(() => said('draining ') && (env.CUT_MS !== '0' || said('cut ')))
+    },
+    // the exit, when nothing that's still running may finish
+    kill() {
+      bot.kill('SIGKILL')
+    },
+    // SIGTERM, as on a deploy (unless term() has sent it: a second one
+    // kills), then the bot's end; resolves to its job log lines
+    async stop() {
+      if (!termed) bot.kill('SIGTERM')
       await bot.exited
       // the answers to calls still on their way
       await Bun.sleep(100)
       api.stop(true)
+      await reading
       rmSync(work, { recursive: true, force: true })
-      return (await out).split('\n').filter((l) => l.startsWith('job '))
+      return lines.filter((l) => l.startsWith('job '))
     },
   }
 }
 
 const skip = !Bun.which('ffmpeg') && !process.env.CI
 
-test.concurrent.skipIf(skip)(
+// A fake Bot API answer that waits until the test opens it
+function gate() {
+  let open = () => {}
+  const p = new Promise<void>((go) => (open = go))
+  return Object.assign(p, { open })
+}
+// The deploy tests' drain: it cuts at once, and nothing ends it but the
+// test, or the handlers all being done (no 15 s timer to race)
+const DEPLOY = { DRAIN_MS: '600000', CUT_MS: '0' }
+// Half time, for the tests of time limits: a minute is 125 ms, a stopped
+// yt-dlp run is over 2.5 s after its SIGTERM, and test/yt-dlp's waits are halved
+const HALF = { MINUTE_MS: '125', GRACE_MS: '2500', FAKE_SCALE: '0.5' }
+// Whether a process is still running; a zombie counts as gone: a container's
+// PID 1 may never reap the orphan
+function alive(pid: number) {
+  try {
+    process.kill(pid, 0)
+    const state = existsSync('/proc')
+      ? readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').pop()!
+      : Bun.spawnSync(['ps', '-o', 'stat=', '-p', String(pid)]).stdout.toString().trim()
+    return state !== '' && !state.startsWith('Z')
+  } catch {
+    return false
+  }
+}
+
+test.skipIf(skip)(
   'bot: a short link goes out while long ones download, and a queued one says so',
   async () => {
     const bot = start()
@@ -209,7 +275,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: an Instagram reel, which doesn't say how long it is, goes out while three long videos download; a stream that doesn't waits",
   async () => {
     // four slots, three for long videos
@@ -241,31 +307,36 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: by default eight slots, seven for long videos, one user's long ones six; the job line counts the user's own jobs that have a slot or wait for one",
   async () => {
     // An empty MAX_DOWNLOADS is read as unset, so this runs the default;
-    // "longcrawl" links are long videos that download in 9 s, "long" ones in 3 s
+    // "dhold" downloads go on once the test lets them
     const bot = start({ MAX_DOWNLOADS: '' })
     let jobs: string[] = []
     const downloading = (chat: number) => bot.statuses(chat).filter((s) => s.startsWith('⏬')).length
+    const held = [...[1, 2, 3, 4, 5, 6, 7, 8].map((i) => `dholdlong1x${i}`), 'dholdlong2', 'dholdlong3']
     try {
       // user 1's six long links download at once...
-      for (let i = 1; i <= 6; i++) bot.link(1, `longcrawl1x${i}`)
+      for (let i = 1; i <= 6; i++) bot.link(1, `dholdlong1x${i}`)
       await bot.until(() => downloading(1) === 6)
       // ...and their seventh waits for one of them
-      bot.link(1, 'long1x7')
+      bot.link(1, 'dholdlong1x7')
       await bot.until(() => bot.statuses(1).some((s) => s.startsWith('⏳')))
       // user 2's long link takes the seventh long slot
-      bot.link(2, 'longcrawl2')
+      bot.link(2, 'dholdlong2')
       await bot.until(() => downloading(2) === 1)
       // user 3's waits for a long slot, and a short link takes the eighth slot
-      bot.link(3, 'long3')
+      bot.link(3, 'dholdlong3')
       bot.link(4, 'short4')
       await bot.until(() => bot.statuses(3).some((s) => s.startsWith('⏳')))
       // user 1's eighth comes after their seventh, still in line, and user 3's
-      bot.link(1, 'long1x8')
-      await bot.until(() => bot.videos().length === 11, 30_000)
+      bot.link(1, 'dholdlong1x8')
+      await bot.until(() => bot.statuses(1).filter((s) => s.startsWith('⏳')).length === 2)
+      // the ones in line wait 2 s at least, then everything downloads
+      await Bun.sleep(2000)
+      for (const v of held) bot.release(v, 'dl')
+      await bot.until(() => bot.videos().length === 11)
     } finally {
       jobs = await bot.stop()
     }
@@ -286,40 +357,43 @@ test.concurrent.skipIf(skip)(
   60_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a request for a link still in yt-dlp -J hears that it is queued when the job is',
   async () => {
     const bot = start()
     let jobs: string[] = []
-    const acted = (chat: number) => bot.calls.some((c) => c.chat === chat && c.method === 'sendChatAction')
+    const queued = (chat: number) => bot.statuses(chat).some((s) => s.startsWith('⏳'))
     try {
-      // one user's two long links keep the long lane busy for 6 s...
-      bot.link(1, 'long1')
-      bot.link(1, 'long2')
-      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('⏳')))
-      // ...another user's long link takes 3 s to describe, then waits...
-      bot.link(2, 'slowlong3')
-      await bot.until(() => acted(2))
-      await Bun.sleep(300)
-      // ...and a third user asks for it while it's being described
-      bot.link(3, 'slowlong3')
+      // one user's two long links keep the long lane busy...
+      bot.link(1, 'dholdlong1')
+      bot.link(1, 'dholdlong2')
+      await bot.until(() => queued(1))
+      // ...another user's long link is being described...
+      bot.link(2, 'jholddholdlong3')
+      await bot.until(() => bot.held('jholddholdlong3', 'J'))
+      // ...and a third user asks for it meanwhile; then the job waits for a slot
+      bot.link(3, 'jholddholdlong3')
+      bot.release('jholddholdlong3', 'J')
+      await bot.until(() => queued(2) && queued(3))
+      // then the downloads go on, in the order the slots come free
+      for (const v of ['dholdlong1', 'dholdlong2', 'jholddholdlong3']) bot.release(v, 'dl')
       await bot.until(() => bot.videos().length === 4)
     } finally {
       jobs = await bot.stop()
     }
-    expect(bot.videos().map((v) => [v.chat, v.upload])).toEqual([
-      [1, true],
-      [1, true],
-      [2, true],
-      [3, false],
-    ])
+    // whichever of user 1's second and user 2's gets the slot first (fair
+    // turns), the third user's copy is the job's file, sent after it
+    const sent = bot.videos().map((v) => [v.chat, v.upload] as const)
+    expect(sent.filter(([, upload]) => upload).map(([chat]) => chat).sort()).toEqual([1, 1, 2])
+    const at = (chat: number, upload: boolean) => sent.findIndex(([c, u]) => c === chat && u === upload)
+    expect(at(3, false)).toBeGreaterThan(at(2, true))
     for (const chat of [2, 3]) expect(bot.statuses(chat).map((s) => s[0])).toEqual(['⏳', '⏬', '⏫'])
     expect(jobs).toHaveLength(3)
   },
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a request for a link that is already downloading hears so, then that it is uploading',
   async () => {
     const bot = start()
@@ -340,20 +414,23 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, jobs still running near the exit tell their chats to send the link again',
   async () => {
-    // the exit comes 1 s after the drain starts, the notice at once
-    const bot = start({ DRAIN_MS: '1000' })
+    const bot = start(DEPLOY)
     let jobs: string[] = []
     const acted = (chat: number) => bot.calls.some((c) => c.chat === chat && c.method === 'sendChatAction')
     try {
-      // a 3 s download...
-      bot.link(1, 'long1')
+      // a download...
+      bot.link(1, 'dholdlong1')
       await bot.until(() => bot.statuses(1).length > 0)
-      // ...and a link still in its 3 s yt-dlp -J
-      bot.link(2, 'slowshort2')
+      // ...and a link in yt-dlp -J (or waiting for it), neither ending
+      bot.link(2, 'jholdshort2')
       await bot.until(() => acted(2))
+      // the cut tells both, then the exit
+      await bot.term()
+      await bot.until(() => bot.statuses(1).length === 2 && bot.statuses(2).length === 1)
+      bot.kill()
     } finally {
       jobs = await bot.stop()
     }
@@ -365,16 +442,21 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, a short link whose yt-dlp -J ends meanwhile still goes out when a slot is free',
   async () => {
-    const bot = start()
+    const bot = start({ DRAIN_MS: '600000' })
     let jobs: string[] = []
     try {
-      bot.link(1, 'long1')
+      bot.link(1, 'dholdlong1')
       await bot.until(() => bot.statuses(1).length > 0)
-      bot.link(2, 'slowshort2')
+      bot.link(2, 'jholdshort2')
       await bot.until(() => bot.calls.some((c) => c.chat === 2 && c.method === 'sendChatAction'))
+      // the deploy begins, then the -J and the download end; the drain
+      // waits for both
+      await bot.term()
+      bot.release('jholdshort2', 'J')
+      bot.release('dholdlong1', 'dl')
     } finally {
       jobs = await bot.stop()
     }
@@ -385,17 +467,21 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, a link still in the queue hears to send it again; the running one finishes',
   async () => {
-    const bot = start()
+    const bot = start({ DRAIN_MS: '600000' })
     let jobs: string[] = []
     try {
-      bot.link(1, 'long1')
+      bot.link(1, 'dholdlong1')
       bot.link(1, 'long2')
       // long2's ⏳ may come from its wait for a yt-dlp -J turn, before long1 has its slot
       const has = (icon: string) => bot.statuses(1).some((s) => s.startsWith(icon))
       await bot.until(() => has('⏳') && has('⏬'))
+      // the deploy tells the queued one, then the running one ends
+      await bot.term()
+      await bot.until(() => has('🔄'))
+      bot.release('dholdlong1', 'dl')
     } finally {
       jobs = await bot.stop()
     }
@@ -407,24 +493,29 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, links waiting for or in yt-dlp -J hear to send them again, after the queued status of the waiting one',
   async () => {
-    const bot = start()
+    const bot = start({ DRAIN_MS: '600000' })
     let jobs: string[] = []
-    const acted = (chat: number) => bot.calls.some((c) => c.chat === chat && c.method === 'sendChatAction')
     try {
       // a long download holds the long lane...
-      bot.link(1, 'long1')
+      bot.link(1, 'dholdlong1')
       await bot.until(() => bot.statuses(1).length > 0)
-      // ...two long links take both -J turns for 3 s...
-      bot.link(2, 'slowlong2')
-      bot.link(3, 'slowlong3')
-      await bot.until(() => acted(2) && acted(3))
-      await Bun.sleep(200)
-      // ...and a third link waits for a -J turn
+      // ...two long links take both -J turns...
+      bot.link(2, 'jholdlong2')
+      bot.link(3, 'jholdlong3')
+      await bot.until(() => bot.held('jholdlong2', 'J') && bot.held('jholdlong3', 'J'))
+      // ...and a third link waits for one
       bot.link(4, 'short4')
-      await bot.until(() => acted(4))
+      await bot.until(() => bot.statuses(4).length > 0)
+      // the deploy tells the waiting one; the two in -J hear once it ends
+      // (no slot for a long video), and the download finishes
+      await bot.term()
+      await bot.until(() => bot.statuses(4).length === 2)
+      bot.release('jholdlong2', 'J')
+      bot.release('jholdlong3', 'J')
+      bot.release('dholdlong1', 'dl')
     } finally {
       jobs = await bot.stop()
     }
@@ -438,7 +529,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a queued link to a video that another link has sent meanwhile gets the cached file',
   async () => {
     const bot = start()
@@ -462,7 +553,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a link waiting for a yt-dlp -J turn hears it is queued',
   async () => {
     const bot = start()
@@ -493,7 +584,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a tweet without a video that waited for a yt-dlp -J turn has its queued status removed, a second request too',
   async () => {
     const bot = start()
@@ -526,14 +617,17 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: on a deploy, a failure message still on its way isn't turned into the exit notice",
   async () => {
-    // the failure reply takes 700 ms; the exit notice would come at once
-    const bot = start({ DRAIN_MS: '1500' }, (c) => (c.method === 'sendMessage' && c.text?.startsWith('😱') ? 700 : 0))
+    // the failure reply is still on its way when the deploy cuts
+    const reply = gate()
+    const bot = start(DEPLOY, (c) => (c.method === 'sendMessage' && c.text?.startsWith('😱') ? reply : 0))
     try {
       bot.link(1, 'fail1')
       await bot.until(() => bot.calls.some((c) => c.chat === 1 && c.method === 'sendMessage'))
+      await bot.term()
+      reply.open()
     } finally {
       await bot.stop()
     }
@@ -542,12 +636,15 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: on a deploy, a cached video on its way doesn't keep the exit notice next to it",
   async () => {
-    // the cached resend takes 500 ms, the exit notice 900 ms
-    const bot = start({ DRAIN_MS: '1500' }, (c) =>
-      c.chat === 2 && c.method === 'sendVideo' ? 500 : c.method === 'sendMessage' && c.text?.startsWith('🔄') ? 900 : 0,
+    // the cached resend is on its way when the deploy cuts, and arrives
+    // while the exit notice is on its way
+    const video = gate()
+    const notice = gate()
+    const bot = start(DEPLOY, (c) =>
+      c.chat === 2 && c.method === 'sendVideo' ? video : c.method === 'sendMessage' && c.text?.startsWith('🔄') ? notice : 0,
     )
     try {
       bot.link(1, 'short1')
@@ -555,6 +652,12 @@ test.concurrent.skipIf(skip)(
       // the same link from another user: a cached resend, no status
       bot.link(2, 'short1')
       await bot.until(() => bot.calls.some((c) => c.chat === 2 && c.method === 'sendVideo'))
+      await bot.term()
+      await bot.until(() => bot.statuses(2).length === 1)
+      // the video first, as a rule (the other way ends the same)
+      video.open()
+      await Bun.sleep(50)
+      notice.open()
     } finally {
       await bot.stop()
     }
@@ -567,19 +670,23 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, a job whose upload has begun keeps its status; a request following it hears to send the link again',
   async () => {
-    // chat 1's upload takes 1.5 s, past the exit
-    const bot = start({ DRAIN_MS: '1000' }, (c) => (c.method === 'sendVideo' && c.chat === 1 ? 1500 : 0))
+    // chat 1's upload doesn't end before the exit
+    const bot = start(DEPLOY, (c) => (c.method === 'sendVideo' && c.chat === 1 ? gate() : 0))
     try {
-      bot.link(1, 'long1')
+      bot.link(1, 'dholdlong1')
       await bot.until(() => bot.statuses(1).length > 0)
       // another user asks for it while it downloads...
-      bot.link(3, 'long1')
+      bot.link(3, 'dholdlong1')
       await bot.until(() => bot.statuses(3).length > 0)
       // ...and the upload has begun (the call is logged when it arrives)
+      bot.release('dholdlong1', 'dl')
       await bot.until(() => bot.videos().length === 1 && bot.statuses(3).length === 2)
+      await bot.term()
+      await bot.until(() => bot.statuses(3).length === 3)
+      bot.kill()
     } finally {
       await bot.stop()
     }
@@ -590,19 +697,18 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-// The drain below takes 3 s: the cut comes 1 s in, the exit 3 s in. The
-// status the job awaits takes 1.8 s to answer, so the job gets through its
-// download and up to its upload between the two.
-const slow = (status: string) => (c: Call) => (c.text?.startsWith(status) ? 1800 : 0)
-
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, a download that ends after the cut hears to send the link again and is not uploaded',
   async () => {
-    const bot = start({ DRAIN_MS: '3000' }, slow('⏬'))
+    const bot = start(DEPLOY)
     let jobs: string[] = []
     try {
-      bot.link(1, 'short1')
+      bot.link(1, 'dholdshort1')
       await bot.until(() => bot.statuses(1).length > 0)
+      // the cut comes while it downloads, the download ends after it
+      await bot.term()
+      await bot.until(() => bot.statuses(1).length === 2)
+      bot.release('dholdshort1', 'dl')
     } finally {
       jobs = await bot.stop()
     }
@@ -614,14 +720,18 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, a job at "⏫" whose upload has not begun by the cut hears to send the link again',
   async () => {
-    const bot = start({ DRAIN_MS: '3000' }, slow('⏫'))
+    // the job awaits its ⏫ status before the upload; the cut comes meanwhile
+    const uploading = gate()
+    const bot = start(DEPLOY, (c) => (c.text?.startsWith('⏫') ? uploading : 0))
     let jobs: string[] = []
     try {
       bot.link(1, 'short1')
       await bot.until(() => bot.statuses(1).length > 1)
+      await bot.term()
+      uploading.open()
     } finally {
       jobs = await bot.stop()
     }
@@ -633,18 +743,21 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, a job at "⏫" still probing its file at the exit hears to send the link again',
   async () => {
-    // an ffprobe that takes 10 s, well past the exit (nothing waits for it)
+    // an ffprobe that doesn't end before the exit (nor outlive the test)
     const bin = mkdtempSync(join(tmpdir(), 'bot-e2e-bin-'))
-    writeFileSync(join(bin, 'ffprobe'), `#!/bin/sh\nsleep 10\nexec ${Bun.which('ffprobe')} "$@"\n`)
+    writeFileSync(join(bin, 'ffprobe'), `#!/bin/sh\nwhile [ -d "${bin}" ]; do sleep 0.1; done\n`)
     chmodSync(join(bin, 'ffprobe'), 0o755)
-    const bot = start({ DRAIN_MS: '3000', PATH: `${bin}:${join(import.meta.dir, 'test')}:${process.env.PATH}` })
+    const bot = start({ ...DEPLOY, PATH: `${bin}:${join(import.meta.dir, 'test')}:${process.env.PATH}` })
     let jobs: string[] = []
     try {
       bot.link(1, 'short1')
       await bot.until(() => bot.statuses(1).length > 1)
+      await bot.term()
+      await bot.until(() => bot.statuses(1).length === 3)
+      bot.kill()
     } finally {
       jobs = await bot.stop()
       rmSync(bin, { recursive: true, force: true })
@@ -657,14 +770,17 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: on a deploy, a guest reply whose download ends after the cut hears to send the link again',
   async () => {
-    const bot = start({ DRAIN_MS: '3000', STORAGE_CHAT: '9' }, slow('⏬'))
+    const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' })
     let jobs: string[] = []
     try {
-      bot.guest(1, 'short1')
+      bot.guest(1, 'dholdshort1')
       await bot.until(() => bot.inline().length > 0)
+      // the cut comes while it downloads, the download ends after it
+      await bot.term()
+      bot.release('dholdshort1', 'dl')
     } finally {
       jobs = await bot.stop()
     }
@@ -677,7 +793,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a failed download logs how long it ran and the MB it got',
   async () => {
     const bot = start()
@@ -700,35 +816,40 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a download stops once one of its files passes 2000 MB, as too large, without reading the page again',
   async () => {
-    // a minute is 250 ms: the files are weighed every 21 ms, and a long
-    // video's job has 11.25 s. long1 holds the long slot for 3 s, by when
-    // endlessstream2's saved info is stale, so a failed download of it would
-    // read the page again. Its file passes 2000 MB 0.5 s in, and its yt-dlp
-    // would go on for 20 s. It leaves a process in its group that ignores the
-    // stop's SIGTERM, doesn't hold its output and would live 7 s: it gets the
-    // SIGKILL as the run ends. parts3 has a merge on disk, each file 2000 MB
-    // at most and 4000 MB together, and goes out.
+    // half time: a minute is 125 ms, the files are weighed every 10 ms, and a
+    // long video's job has 5.6 s. long1 holds the long slot for 1.5 s, by
+    // when endlessstream2's saved info is stale, so a failed download of it
+    // would read the page again. Its file passes 2000 MB 0.25 s in, and its
+    // yt-dlp would go on for 10 s. It leaves a process in its group that
+    // ignores the stop's SIGTERM, doesn't hold its output and would live
+    // 3.5 s: it gets the SIGKILL as the run ends. parts3 has a merge on disk,
+    // each file 2000 MB at most and 4000 MB together, and goes out.
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
     const log = () => readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8'))
-    const bot = start({ MINUTE_MS: '250', LINGER: dir })
+    const bot = start({ ...HALF, LINGER: dir })
     let jobs: string[] = []
     let lingered: string[] = []
+    let gone = false
     try {
       bot.link(1, 'long1')
       await bot.until(() => bot.statuses(1).length > 0)
       bot.link(2, 'endlessstream2')
       bot.link(3, 'parts3')
       await bot.until(() => bot.videos().length === 2 && bot.statuses(2).some((s) => s.startsWith('😱')))
-      // past the 7 s it would live
-      for (let i = 0; i < 200 && !log().some((l) => l.includes('done')); i++) await Bun.sleep(50)
+      // the lingering process (its log is named <link>.<its pid>) is gone
+      // within a second of the run's end, short of its "done"
+      const pid = Number(readdirSync(dir)[0]!.split('.').pop())
+      for (let i = 0; i < 20 && alive(pid); i++) await Bun.sleep(50)
+      gone = !alive(pid)
       lingered = log()
     } finally {
       jobs = await bot.stop()
       rmSync(dir, { recursive: true, force: true })
     }
+    expect(gone).toBe(true)
     expect(lingered).toEqual(['up\n'])
     expect(bot.videos().map((v) => v.chat).sort()).toEqual([1, 3])
     expect(bot.statuses(2).map((s) => [...s][0])).toEqual(['⏳', '⏬', '😱'])
@@ -739,34 +860,22 @@ test.concurrent.skipIf(skip)(
     expect(line).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=long ahead=0 own=0 dur=\? wait=\d+\.\d dl=\d+\.\d mb=2001 total=/)
     expect(line).not.toContain('reread=')
     const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
-    expect(dl).toBeGreaterThanOrEqual(0.5)
-    expect(dl).toBeLessThan(3)
+    expect(dl).toBeGreaterThanOrEqual(0.25)
+    expect(dl).toBeLessThan(1.5)
   },
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: the time limit also stops a child of yt-dlp that holds its output, as ffmpeg does, and frees the slot',
   async () => {
-    // a minute is 250 ms, so a short video's job has 7.5 s, and the child
-    // would keep yt-dlp's stdout and stderr open for 20 s; the second one's
-    // child ignores SIGTERM: its job ends 5 s later all the same, and the
-    // child must take the SIGKILL then, rather than go on to its 20 s. The
-    // two hold both slots, so a third link waits for the first one's
+    // half time: a short video's job has 3.75 s, and the child would keep
+    // yt-dlp's stdout and stderr open for 10 s; the second one's child
+    // ignores SIGTERM: its job ends 2.5 s later all the same, and the child
+    // must take the SIGKILL then, rather than go on to its 10 s. The two hold
+    // both slots, so a third link waits for the first one's
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-stubborn-'))
-    const bot = start({ MINUTE_MS: '250', LINGER: dir })
-    // a zombie counts as gone: a container's PID 1 may never reap the orphan
-    const alive = (pid: number) => {
-      try {
-        process.kill(pid, 0)
-        const state = existsSync('/proc')
-          ? readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').pop()!
-          : Bun.spawnSync(['ps', '-o', 'stat=', '-p', String(pid)]).stdout.toString().trim()
-        return state !== '' && !state.startsWith('Z')
-      } catch {
-        return false
-      }
-    }
+    const bot = start({ ...HALF, LINGER: dir })
     let jobs: string[] = []
     let stubborn = 0
     let survived = true
@@ -797,38 +906,39 @@ test.concurrent.skipIf(skip)(
     for (const line of timeouts)
       expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=short .* dl=\d+\.\d mb=2 total=/)
     const [term, kill] = timeouts.map((l) => Number(/ dl=([\d.]+)/.exec(l)![1])).sort((a, b) => a - b)
-    expect(term).toBeGreaterThanOrEqual(7.5)
-    expect(term).toBeLessThan(9)
-    expect(kill).toBeGreaterThanOrEqual(12.5)
-    expect(kill).toBeLessThan(14)
-    // the third got the first one's slot when that one hit its time limit, 7.5 s
-    // after it began downloading, less the moment the third link came in
+    // the first at its time limit, not after the grace too; the second after
+    // the grace, not the child's 10 s
+    expect(term).toBeGreaterThanOrEqual(3.75)
+    expect(term).toBeLessThan(5.5)
+    expect(kill).toBeGreaterThanOrEqual(6.25)
+    expect(kill).toBeLessThan(9)
+    // the third got the first one's slot when that one hit its time limit,
+    // 3.75 s after it began downloading, less the moment the third link came in
     const next = jobs.find((l) => l.startsWith('job ok '))!
     expect(next).toMatch(/^job ok host=www\.youtube\.com .*lane=short ahead=0 /)
     const wait = Number(/ wait=([\d.]+)/.exec(next)![1])
-    expect(wait).toBeGreaterThan(5)
-    expect(wait).toBeLessThan(9)
+    expect(wait).toBeGreaterThan(1)
+    expect(wait).toBeLessThan(5.5)
   },
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: a timed-out run leaves nothing in its group, and a pipe holder that left the group doesn't keep the job",
   async () => {
-    // a minute is 250 ms, so a short video's job has 7.5 s. ffmpegdeaflinger1's
-    // child dies at the SIGTERM and closes yt-dlp's output, but the process it
-    // left in yt-dlp's group ignores SIGTERM and would live 10 s.
-    // escapeffmpeg1's child holds yt-dlp's output for 20 s from a session of
-    // its own, which the signals don't reach: its job ends 5 s after the
-    // SIGTERM all the same
+    // half time: a short video's job has 3.75 s. ffmpegdeaflinger1's child
+    // dies at the SIGTERM and closes yt-dlp's output, but the process it left
+    // in yt-dlp's group ignores SIGTERM and would live 5 s. escapeffmpeg1's
+    // child holds yt-dlp's output for 10 s from a session of its own, which
+    // the signals don't reach: its job ends 2.5 s after the SIGTERM all the same
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-deaf-'))
-    const bot = start({ MINUTE_MS: '250', LINGER: dir })
+    const bot = start({ ...HALF, LINGER: dir })
     let jobs: string[] = []
     let log: string[] = []
     try {
       bot.link(1, 'ffmpegdeaflinger1')
       bot.link(2, 'escapeffmpeg1')
-      // the second ends at 12.5 s, past the 10 s the lingering process would
+      // the second ends at 6.25 s, past the 5 s the lingering process would
       // live if nothing stopped it
       await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))), 25_000)
       log = readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8'))
@@ -842,22 +952,24 @@ test.concurrent.skipIf(skip)(
     for (const line of jobs)
       expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=short .* dl=\d+\.\d mb=2 total=/)
     const [deaf, escape] = jobs.map((l) => Number(/ dl=([\d.]+)/.exec(l)![1])).sort((a, b) => a - b)
-    expect(deaf).toBeGreaterThanOrEqual(7.5)
-    expect(deaf).toBeLessThan(9)
-    expect(escape).toBeGreaterThanOrEqual(12.5)
-    expect(escape).toBeLessThan(14)
+    // at the time limit, not after the grace too; after the grace, not the
+    // child's 10 s
+    expect(deaf).toBeGreaterThanOrEqual(3.75)
+    expect(deaf).toBeLessThan(5.5)
+    expect(escape).toBeGreaterThanOrEqual(6.25)
+    expect(escape).toBeLessThan(9)
   },
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
-  "bot: a download stopped as too large is over 5 s after the stop, even if a pipe holder left yt-dlp's group",
+test.skipIf(skip)(
+  "bot: a download stopped as too large is over the grace time after the stop, even if a pipe holder left yt-dlp's group",
   async () => {
-    // a minute is 250 ms, so a short video's job has 7.5 s. escapeendless1's
-    // file passes 2000 MB 0.5 s in, and its child holds yt-dlp's output for
-    // 20 s from a session of its own: the job ends 5 s after that stop, well
-    // before its time limit
-    const bot = start({ MINUTE_MS: '250' })
+    // half time: a short video's job has 3.75 s. escapeendless1's file passes
+    // 2000 MB 0.25 s in, and its child holds yt-dlp's output for 10 s from a
+    // session of its own: the job ends 2.5 s after that stop, before its time
+    // limit
+    const bot = start(HALF)
     let jobs: string[] = []
     try {
       bot.link(1, 'escapeendless1')
@@ -870,26 +982,27 @@ test.concurrent.skipIf(skip)(
     expect(jobs).toHaveLength(1)
     expect(jobs[0]).toMatch(/^job fail:tooBig host=www\.youtube\.com .*lane=short .* dl=\d+\.\d mb=2001 total=/)
     const dl = Number(/ dl=([\d.]+)/.exec(jobs[0]!)![1])
-    expect(dl).toBeGreaterThanOrEqual(5.5)
-    expect(dl).toBeLessThan(7)
+    // not the 10 s the pipe holder would keep it
+    expect(dl).toBeGreaterThanOrEqual(2.75)
+    expect(dl).toBeLessThan(5)
   },
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: the time limit's signals end with yt-dlp's run",
   async () => {
-    // a minute is 250 ms, so a short video's job has 7.5 s. linger1's yt-dlp
-    // is done in 0.2 s, and lingerbroken1's fails then, but each leaves a
-    // process in its group that doesn't hold its output and lives 15 s: once a
-    // run is over, whichever way it ended, neither the time limit's SIGTERM
-    // nor a SIGKILL may reach its group (by then the number could lead
-    // another one)
+    // half time: a short video's job has 3.75 s, and a stopped run gets
+    // 2.5 s. linger1's yt-dlp is done in 0.1 s, and lingerbroken1's fails
+    // then, but each leaves a process in its group that doesn't hold its
+    // output and lives 7.5 s: once a run is over, whichever way it ended,
+    // neither the time limit's SIGTERM nor a SIGKILL may reach its group (by
+    // then the number could lead another one)
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
     // each lingering process's log, by its link (a page read again is
     // another run, with a process of its own)
     const logs = () => readdirSync(dir).map((f) => [f.split('.')[0]!, readFileSync(join(dir, f), 'utf8')] as const)
-    const bot = start({ MINUTE_MS: '250', LINGER: dir })
+    const bot = start({ ...HALF, LINGER: dir })
     let jobs: string[] = []
     let seen: ReturnType<typeof logs> = []
     try {
@@ -913,12 +1026,12 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: a long video's download goes on past the time a short one gets",
   async () => {
-    // a minute of download time is 250 ms: 7.5 s for a short video, 11.25 s
-    // for a long one, and both of these take 9 s
-    const bot = start({ MINUTE_MS: '250' })
+    // half time: 3.75 s for a short video, 5.6 s for a long one, and both of
+    // these take 4.5 s
+    const bot = start(HALF)
     let jobs: string[] = []
     try {
       bot.link(1, 'crawl1')
@@ -931,29 +1044,28 @@ test.concurrent.skipIf(skip)(
     expect(bot.statuses(1).map((s) => [...s][0])).toEqual(['⏬', '😱'])
     expect(jobs).toHaveLength(2)
     const dl = (line: string) => Number(/ dl=([\d.]+)/.exec(line)![1])
-    // the short one is stopped at its 7.5 s, with the 2 MB it had...
+    // the short one is stopped at its 3.75 s, with the 2 MB it had...
     const short = jobs.find((l) => l.includes(' lane=short '))!
     expect(short).toMatch(/^job timeout host=www\.youtube\.com .* dl=\d+\.\d mb=2 total=/)
-    expect(dl(short)).toBeGreaterThanOrEqual(7.5)
-    expect(dl(short)).toBeLessThan(9)
+    expect(dl(short)).toBeGreaterThanOrEqual(3.75)
+    expect(dl(short)).toBeLessThan(5.5)
     // ...while the long one downloads for longer and goes out
     const long = jobs.find((l) => l.includes(' lane=long '))!
     expect(long).toMatch(/^job ok host=www\.youtube\.com /)
-    expect(dl(long)).toBeGreaterThan(7.5)
+    expect(dl(long)).toBeGreaterThan(3.75)
   },
   40_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a page read again gets only the time the job has left',
   async () => {
-    // a minute is 250 ms, so a long video's job has 11.25 s, and
-    // "Downloading…" takes 500 ms to show, by when slowexpiredlong1's saved
-    // info is stale. Its download from that info fails after 4 s, then the
-    // page is read again (3 s, "slow") and downloaded from (9 s): in the 4.25
-    // s left that times out, where the 7.25 s left before the read would
-    // still end later
-    const bot = start({ MINUTE_MS: '250' }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
+    // half time: a long video's job has 5.625 s, and "Downloading…" takes
+    // 250 ms to show, by when slowexpiredlong1's saved info is stale. Its
+    // download from that info fails after 2 s, then the page is read again
+    // (1.5 s, "slow") and downloaded from (4.5 s): in the 2.125 s left that
+    // times out, where the 3.625 s left before the read would still end later
+    const bot = start(HALF, (c) => (c.text?.startsWith('⏬') ? 250 : 0))
     let jobs: string[] = []
     try {
       bot.link(1, 'slowexpiredlong1')
@@ -966,16 +1078,16 @@ test.concurrent.skipIf(skip)(
     const line = jobs[0]!
     // the same pick, though the try from saved info got nothing
     expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=long .* reread=1 kept=0 dl=\d+\.\d mb=2 total=/)
-    // the job's 11.25 s in all, not 4 s and then another 11.25, nor 4 s, the
-    // read again and 7.25 s
+    // the job's 5.625 s in all, not 2 s and then another 5.625, nor 2 s, the
+    // read again and 3.625 s
     const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
-    expect(dl).toBeGreaterThanOrEqual(11.25)
-    expect(dl).toBeLessThan(13)
+    expect(dl).toBeGreaterThanOrEqual(5.6)
+    expect(dl).toBeLessThan(7.5)
   },
   45_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a page read again goes on from the failed download only in the format that got it',
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -1035,7 +1147,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: a page read again that doesn't answer in the time the job has left stops with it",
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s, and
@@ -1069,7 +1181,7 @@ test.concurrent.skipIf(skip)(
 // The sent videos and audio files
 const files = (calls: Call[]) => calls.filter((c) => /^send(Video|Audio)$/.test(c.method))
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: a page read again that picks another video sends that one as itself, cached under its own id, not the first one's",
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -1082,10 +1194,11 @@ test.concurrent.skipIf(skip)(
       bot.link(1, 'old1&cut&next=new1')
       // its status goes once the job is over
       await bot.until(() => bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage'))
-      // new1 by its own link, old1 by another one, and old4, whose page read
-      // again shows new1 too
+      // new1 by its own link, old1 by another one, and once new1 is cached,
+      // old4, whose page read again shows new1 too
       bot.link(2, 'new1')
       bot.link(3, 'old1')
+      await bot.until(() => files(bot.calls).some((c) => c.chat === 2))
       bot.link(4, 'old4&cut&next=new1')
       await bot.until(
         () => files(bot.calls).length === 4 && [3, 4].every((chat) => bot.calls.some((c) => c.chat === chat && c.method === 'deleteMessage')),
@@ -1121,7 +1234,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   "bot: a post with several videos whose first one has changed when read again sends the new one, downloaded from its own info, not the post's",
   async () => {
     // As above, with old1 a post with several videos, whose -J is a playlist
@@ -1163,7 +1276,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a page read again that picks a live stream, or a video too big to send, says so',
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -1191,7 +1304,7 @@ test.concurrent.skipIf(skip)(
   30_000,
 )
 
-test.concurrent.skipIf(skip)(
+test.skipIf(skip)(
   'bot: a refresh of an unsized video goes on only while the page picks that video, at the first read or when read again',
   async () => {
     // old1, old2 and old3 have copies cached under their links and ids

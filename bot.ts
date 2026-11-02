@@ -30,6 +30,8 @@ const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 8)
 // and of how often a download's files are weighed (bot.e2e.test.ts shortens
 // it)
 const MINUTE = Number(env.MINUTE_MS) || 60_000
+// how long a stopped yt-dlp run gets before it's over (bot.e2e.test.ts halves it)
+const GRACE = Number(env.GRACE_MS) || 5_000
 // Only formats whose every request goes through the proxy: yt-dlp's own HTTP
 // (HLS, DASH, websockets) and ffmpeg's http(s), which yt-dlp hands the proxy
 // to. rtmp, rtsp and mms would connect directly.
@@ -301,8 +303,8 @@ async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal
       p.kill(sig)
     }
   }
-  // why the run was stopped, the first time: SIGTERM, and 5 s later the run
-  // is over, even if something still holds the pipes
+  // why the run was stopped, the first time: SIGTERM, and GRACE (5 s) later
+  // the run is over, even if something still holds the pipes
   let stopped: Error | undefined
   const cutoff = Promise.withResolvers<void>()
   const timers: ReturnType<typeof setTimeout>[] = []
@@ -310,7 +312,7 @@ async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal
     if (stopped) return
     stopped = why
     kill('SIGTERM')
-    timers.push(setTimeout(cutoff.resolve, 5_000))
+    timers.push(setTimeout(cutoff.resolve, GRACE))
   }
   timers.push(
     setTimeout(
@@ -1588,15 +1590,22 @@ function main() {
         // one here (the new container polls by now), nor will a long video
         // (it couldn't finish before the exit): they hear so rather than stay
         // "in the queue". A short one that finds a free turn still goes.
+        console.log(`draining ${running}`)
         meta.close(new Fail('restarting'))
         slots.close(new Fail('restarting'))
         // the jobs still running 2 s before the exit won't finish: their
         // chats hear so the same way, rather than keep "Downloading…", and
         // from then on no upload begins
-        const exit = setTimeout(() => {
-          exiting = true
-          open.forEach((cut) => cut())
-        }, DRAIN - 2_000)
+        // (CUT_MS moves the cut: bot.e2e.test.ts cuts at once, reading the
+        // "cut" line, and ends the drain itself)
+        const exit = setTimeout(
+          () => {
+            exiting = true
+            console.log(`cut ${open.size}`)
+            open.forEach((cut) => cut())
+          },
+          Number(env.CUT_MS ?? DRAIN - 2_000),
+        )
         while (running) await Bun.sleep(100)
         clearTimeout(exit)
         await promo.flush()

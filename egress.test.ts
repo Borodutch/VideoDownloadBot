@@ -53,11 +53,6 @@ test('CONNECT target: the port as written, 443 only when there is none', () => {
 
 // "Internal" services on loopback: 127.0.0.2 on Linux, ::1 where only
 // 127.0.0.1 is configured (macOS)
-const hits: string[] = []
-const handler = (req: Request) => {
-  hits.push(new URL(req.url).pathname)
-  return new Response('secret', { headers: { 'content-type': 'video/mp4' } })
-}
 const internalHost = (() => {
   try {
     Bun.serve({ hostname: '127.0.0.2', port: 0, fetch: () => new Response() }).stop()
@@ -66,23 +61,34 @@ const internalHost = (() => {
     return '::1'
   }
 })()
-const internal = Bun.serve({ hostname: internalHost, port: 0, fetch: handler })
-const inside = `http://${internalHost.includes(':') ? `[${internalHost}]` : internalHost}:${internal.port}`
-// The "public" site links and redirects into it
-const site = Bun.serve({
-  hostname: '127.0.0.1',
-  port: 0,
-  fetch: (req) =>
-    new URL(req.url).pathname === '/redirect'
-      ? Response.redirect(`${inside}/v.mp4`, 302)
-      : new Response(`<html><body><video src="${inside}/v.mp4"></video></body></html>`, {
-          headers: { 'content-type': 'text/html' },
-        }),
-})
-afterAll(() => {
-  internal.stop(true)
-  site.stop(true)
-})
+const servers: { stop: (now: boolean) => unknown }[] = []
+afterAll(() => servers.forEach((s) => s.stop(true)))
+// An internal service, and a "public" site that links and redirects into it:
+// each test has its own (they run at once). hits = the paths the service served
+function inner() {
+  const hits: string[] = []
+  const internal = Bun.serve({
+    hostname: internalHost,
+    port: 0,
+    fetch: (req) => {
+      hits.push(new URL(req.url).pathname)
+      return new Response('secret', { headers: { 'content-type': 'video/mp4' } })
+    },
+  })
+  const inside = `http://${internalHost.includes(':') ? `[${internalHost}]` : internalHost}:${internal.port}`
+  const site = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch: (req) =>
+      new URL(req.url).pathname === '/redirect'
+        ? Response.redirect(`${inside}/v.mp4`, 302)
+        : new Response(`<html><body><video src="${inside}/v.mp4"></video></body></html>`, {
+            headers: { 'content-type': 'text/html' },
+          }),
+  })
+  servers.push(internal, site)
+  return { hits, internal, inside, site }
+}
 
 const strict = egressProxy()
 // what production does for real public hosts, with loopback 127.0.0.1 standing in
@@ -99,7 +105,7 @@ function raw(proxy: string, request: string) {
 }
 
 test('proxy refuses internal addresses, by literal or by name', async () => {
-  hits.length = 0
+  const { hits, internal, inside } = inner()
   const p = await strict
   const { port } = internal
   for (const req of [
@@ -117,7 +123,7 @@ test('proxy refuses internal addresses, by literal or by name', async () => {
 })
 
 test('proxy forwards allowed hosts: absolute-form and CONNECT', async () => {
-  hits.length = 0
+  const { hits, inside } = inner()
   const p = await open
   const viaGet = await raw(p, `GET ${inside}/a?b=1 HTTP/1.1\r\nHost: x\r\nProxy-Connection: keep-alive\r\n\r\n`)
   expect(viaGet).toStartWith('HTTP/1.1 200')
@@ -131,6 +137,7 @@ test('proxy forwards allowed hosts: absolute-form and CONNECT', async () => {
 })
 
 test('proxy: raw path and sized body go through, nothing after them does', async () => {
+  const { inside } = inner()
   // an upstream that answers without closing and records all it receives
   let seen = ''
   const sticky = Bun.listen({
@@ -215,13 +222,14 @@ test('proxy: a request body waits for a slow upstream instead of piling up', asy
 
 // CI installs yt-dlp; elsewhere these only run where it is
 const ytdlp = Bun.which('yt-dlp') || process.env.CI
-async function run(proxy: string, ...args: string[]) {
+// env: the bot's environment, which the bot clears of proxy variables
+async function run(proxy: string, args: string[], env: Record<string, string | undefined> = process.env) {
   const dir = await mkdtemp(join(tmpdir(), 'egress-'))
   try {
     const p = Bun.spawn(
       ['yt-dlp', '--proxy', proxy, ...YTDLP, '--no-cache-dir', '-o', join(dir, 'v.%(ext)s'), ...args],
       // the same environment the bot gives it
-      { env: proxyFreeEnv(), stdout: 'pipe', stderr: 'pipe' },
+      { env: proxyFreeEnv(env), stdout: 'pipe', stderr: 'pipe' },
     )
     const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited])
     return { code, err, files: await readdir(dir) }
@@ -231,20 +239,20 @@ async function run(proxy: string, ...args: string[]) {
 }
 
 test.skipIf(!ytdlp)('yt-dlp: a public link redirecting inside is not fetched', async () => {
-  hits.length = 0
+  const { hits, site } = inner()
   // control: without the restriction the redirect is followed and downloaded
-  const control = await run(await open, `http://127.0.0.1:${site.port}/redirect`)
+  const control = await run(await open, [`http://127.0.0.1:${site.port}/redirect`])
   expect([control.code, control.files, hits[0]]).toEqual([0, ['v.mp4'], '/v.mp4'])
   hits.length = 0
-  const r = await run(await publicOnly, `http://127.0.0.1:${site.port}/redirect`)
+  const r = await run(await publicOnly, [`http://127.0.0.1:${site.port}/redirect`])
   expect(r.code).not.toBe(0)
   expect(r.err).toContain('403')
   expect([r.files, hits]).toEqual([[], []])
 }, 60_000)
 
 test.skipIf(!ytdlp)('yt-dlp: a public page embedding an internal video is not fetched', async () => {
-  hits.length = 0
-  const r = await run(await publicOnly, `http://127.0.0.1:${site.port}/page`)
+  const { hits, site } = inner()
+  const r = await run(await publicOnly, [`http://127.0.0.1:${site.port}/page`])
   expect(r.code).not.toBe(0)
   expect([r.files, hits]).toEqual([[], []])
 }, 60_000)
@@ -273,7 +281,7 @@ test.skipIf(!ytdlp || !ffmpeg)('yt-dlp: ffmpeg is not steered into direct rtp/ud
           ),
   })
   try {
-    const r = await run(await publicOnly, `http://127.0.0.1:${hls.port}/v.m3u8`)
+    const r = await run(await publicOnly, [`http://127.0.0.1:${hls.port}/v.m3u8`])
     expect(r.code).not.toBe(0)
     // ffmpeg did get the SDP, and opened nothing it points at
     expect(sdp).toBeGreaterThan(0)
@@ -322,7 +330,7 @@ test.skipIf(!ytdlp || !imf)('yt-dlp: ffmpeg demuxers do not open raw tcp to insi
     },
   })
   try {
-    const r = await run(await publicOnly, `http://127.0.0.1:${hls.port}/v.m3u8`)
+    const r = await run(await publicOnly, [`http://127.0.0.1:${hls.port}/v.m3u8`])
     expect(r.code).not.toBe(0)
     await Bun.sleep(200)
     // ffmpeg got the playlist but never read it as IMF
@@ -355,7 +363,7 @@ test.skipIf(!ytdlp || !ffmpeg)('yt-dlp: ffmpeg still downloads HLS through the p
           }),
   })
   try {
-    const r = await run(await publicOnly, '--downloader', 'm3u8:ffmpeg', `http://127.0.0.1:${hls.port}/v.m3u8`)
+    const r = await run(await publicOnly, ['--downloader', 'm3u8:ffmpeg', `http://127.0.0.1:${hls.port}/v.m3u8`])
     expect(r).toMatchObject({ code: 0, files: ['v.mp4'] })
   } finally {
     hls.stop(true)
@@ -367,6 +375,7 @@ test.skipIf(!ytdlp || !ffmpeg)('yt-dlp: ffmpeg still downloads HLS through the p
 // inside. A NO_PROXY for it in the bot's environment must not let ffmpeg go
 // there directly (yt-dlp gives it the proxy as http_proxy, no_proxy overrides).
 test.skipIf(!ytdlp || !ffmpeg)('yt-dlp: ffmpeg does not fetch an internal segment', async () => {
+  const { hits, inside } = inner()
   const hls = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -375,23 +384,18 @@ test.skipIf(!ytdlp || !ffmpeg)('yt-dlp: ffmpeg does not fetch an internal segmen
         headers: { 'content-type': 'application/vnd.apple.mpegurl' },
       }),
   })
-  const saved = { no_proxy: process.env.no_proxy, NO_PROXY: process.env.NO_PROXY }
   try {
     const link = `http://127.0.0.1:${hls.port}/v.m3u8`
     // control: unrestricted, ffmpeg does reach the internal segment
-    hits.length = 0
-    await run(await open, '--downloader', 'm3u8:ffmpeg', link)
+    await run(await open, ['--downloader', 'm3u8:ffmpeg', link])
     expect(hits).toContain('/s.ts')
     hits.length = 0
-    process.env.no_proxy = process.env.NO_PROXY = internalHost
-    const r = await run(await publicOnly, '--downloader', 'm3u8:ffmpeg', link)
+    const env = { ...process.env, no_proxy: internalHost, NO_PROXY: internalHost }
+    const r = await run(await publicOnly, ['--downloader', 'm3u8:ffmpeg', link], env)
     expect([r.files, hits]).toEqual([[], []])
     expect(r.code).not.toBe(0)
     expect(r.err).toContain('403')
   } finally {
-    for (const [k, v] of Object.entries(saved))
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
     hls.stop(true)
   }
 }, 60_000)

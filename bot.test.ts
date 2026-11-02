@@ -1172,7 +1172,8 @@ test.skipIf(!(Bun.which('ffmpeg') || process.env.CI))('probe and thumbnail: disp
   try {
     const flat = join(dir, 'flat.mp4')
     const rot = join(dir, 'rot.mp4')
-    await run(['-f', 'lavfi', '-i', 'testsrc=s=1080x1440:d=1', '-vf', 'setsar=64/27', '-c:v', 'mpeg4', flat])
+    // one frame: a probe needs no more
+    await run(['-f', 'lavfi', '-i', 'testsrc=s=1080x1440:d=1', '-frames:v', '1', '-vf', 'setsar=64/27', '-c:v', 'mpeg4', flat])
     // -display_rotation came with ffmpeg 6 (Debian bookworm has 5.1)
     const rotates = Bun.spawnSync(['ffmpeg', '-hide_banner', '-h', 'full']).stdout.toString().includes('display_rotation')
     if (rotates) await run(['-display_rotation', '90', '-i', flat, '-c', 'copy', rot])
