@@ -63,6 +63,15 @@ import { dirname, join } from 'node:path'
 const SCALE = Number(process.env.FAKE_SCALE) || 1
 const sleep = (ms: number) => Bun.sleep(ms * SCALE)
 const args = process.argv.slice(2)
+// A self-update works, unless $UPDATES is set: then each try adds a line to
+// that file and fails as yt-dlp's does once GitHub's API limit is used up
+if (args.includes('--update-to') && process.env.UPDATES) {
+  appendFileSync(process.env.UPDATES, 'try\n')
+  console.error(
+    'ERROR: Unable to obtain version info (HTTP Error 403: rate limit exceeded); Please try again later or visit  https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest',
+  )
+  process.exit(100)
+}
 if (args.includes('--update-to') || args.includes('--list-extractors')) process.exit(0)
 const info = args.indexOf('--load-info-json')
 const loaded = info >= 0 ? JSON.parse(readFileSync(args[info + 1]!, 'utf8')) : undefined

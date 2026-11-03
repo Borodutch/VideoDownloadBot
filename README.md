@@ -19,7 +19,7 @@ bun install
 TOKEN=123:abc bun bot.ts
 ```
 
-Needs `yt-dlp` and `ffmpeg` on PATH (the Dockerfile ships both). `bun test` runs the checks.
+Needs `yt-dlp` and `ffmpeg` on PATH (the Dockerfile ships both). The bot updates yt-dlp to the newest nightly (`yt-dlp --update-to nightly`) before it starts polling and then daily. A failed update, such as GitHub's 403 once the address the server shares has used up its hourly API limit, is logged and tried again up to six times, 1, 2, 4, 8, 16 and 32 minutes apart (the last just over an hour after the first), while the bot goes on with the yt-dlp it has. A try that hits its 5-minute limit leaves only that last try, 32 minutes later, since every yt-dlp run waits for an update that's running (yt-dlp gives up on a server that doesn't answer within 20 s, so that takes a transfer that trickles or a stuck run). `bun test` runs the checks.
 
 ## Environment
 

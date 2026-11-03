@@ -26,9 +26,9 @@ const TMP = SCRATCH.dir
 // are slow per connection (Eporner kept its speed in 5 downloads at once,
 // #298), so more at once get more done.
 const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 8)
-// A minute, in ms, of the download time limits, of how old saved info may get
-// and of how often a download's files are weighed (bot.e2e.test.ts shortens
-// it)
+// A minute, in ms, of the download time limits, of how old saved info may
+// get, of how often a download's files are weighed and of the waits between
+// self-update tries (bot.e2e.test.ts shortens it)
 const MINUTE = Number(env.MINUTE_MS) || 60_000
 // how long a stopped yt-dlp run gets before it's over (bot.e2e.test.ts halves it)
 const GRACE = Number(env.GRACE_MS) || 5_000
@@ -257,14 +257,64 @@ let proxy: Promise<string> | undefined
 // ponytail: in-process daily self-update; pin a version if nightly ever breaks
 // The update swaps the binary out, so a run started meanwhile waits for it
 // (else spawn fails with "Executable not found"); it takes seconds, and a
-// hung one can't hold every download back for long
+// hung one can't hold every download back for long. A run already going may
+// still fail on the swap, as the one-file yt-dlp reads its modules from the
+// binary's path while it imports them: the daily update swaps it while jobs
+// run, and so does a retry after a failed first try (selfUpdate).
 let updating: Promise<unknown> = Promise.resolve()
-const update = () =>
-  (updating = Bun.spawn(['yt-dlp', '--update-to', 'nightly'], {
+// One try at it: yt-dlp's exit code, or null when the time limit's SIGTERM
+// stopped it (PyInstaller's bootloader hands that on to yt-dlp and then dies
+// by it too). Another signal (an OOM kill) gives an exit code like any
+// failure. cmd and limit differ only in tests.
+export const updateOnce = (cmd = ['yt-dlp', '--update-to', 'nightly'], limit = 5 * 60_000) => {
+  const p = Bun.spawn(cmd, {
     env: { ...process.env, ...SCRATCH.env },
     stdout: 'inherit',
-    timeout: 5 * 60_000,
-  }).exited)
+    timeout: limit,
+    killSignal: 'SIGTERM',
+  })
+  const tried = p.exited.then((code) => (p.signalCode === 'SIGTERM' ? null : code))
+  updating = tried
+  return tried
+}
+
+// The minutes from a failed self-update to its next try. GitHub refuses
+// yt-dlp's version check (HTTP 403 "rate limit exceeded") once the address
+// the bot shares has used up its hourly API limit, which renews within the
+// hour, so the last retry comes just over an hour after the first try (#416).
+const UPDATE_RETRIES = [1, 2, 4, 8, 16, 32]
+
+// Updates yt-dlp to the newest nightly: run() is one try, resolving to
+// yt-dlp's exit code (null when the time limit stopped it). A failed try goes
+// again after each of waits (ms) in turn, until one works, and every failure
+// leaves a log line. After one that ran out of time, only the last (longest)
+// wait's try is left: a try that's running holds yt-dlp runs back (updating;
+// at the start, polling), so that one held them for 5 minutes, and one right
+// after might too. yt-dlp gives up on a server that doesn't answer within
+// 20 s, so it takes a transfer that trickles or a stuck run. first = the
+// first try's result; retries = the whole update, over once a try has worked
+// or none is left. pause is Bun.sleep and log console.error but in tests.
+export function selfUpdate(
+  run: () => Promise<number | null>,
+  waits = UPDATE_RETRIES.map((m) => m * MINUTE),
+  pause: (ms: number) => Promise<unknown> = Bun.sleep,
+  log: (line: string) => void = console.error,
+) {
+  const first = run()
+  const retries = (async () => {
+    let code = await first
+    for (let i = 0; code !== 0; i++) {
+      if (code === null) i = Math.max(i, waits.length - 1)
+      const ms = waits[i]
+      const next = ms === undefined ? 'next try tomorrow' : `retry ${i + 1}/${waits.length} in ${+(ms / 60_000).toFixed(1)} min`
+      log(`yt-dlp update ${code === null ? 'timed out' : `failed (${code})`}, ${next}`)
+      if (ms === undefined) return
+      await pause(ms)
+      code = await run()
+    }
+  })().catch(console.error)
+  return { first, retries }
+}
 
 // yt-dlp ran out of time and was stopped
 export class Timeout extends Error {}
@@ -1546,7 +1596,7 @@ function main() {
   })
   bot.catch((e) => console.error(e.error))
 
-  setInterval(update, 24 * 3600_000)
+  setInterval(() => selfUpdate(updateOnce), 24 * 3600_000)
   void promo.refresh()
   setInterval(promo.refresh, 5 * 60_000)
   setInterval(promo.flush, 60_000)
@@ -1573,8 +1623,10 @@ function main() {
     }
   }
   // Polling and the shared cookie jar's keepalive run only on the container
-  // holding the polling lock; bot.stop() confirms the fetched updates
-  return update().then(() =>
+  // holding the polling lock; bot.stop() confirms the fetched updates. They
+  // begin once the first self-update try is over, while a failed one's
+  // retries go on (yt-dlp runs wait for a try, not for the pauses between).
+  return selfUpdate(updateOnce).first.then(() =>
     pollWithHandover(
       () => {
         setInterval(keepalive, 6 * 3600_000)

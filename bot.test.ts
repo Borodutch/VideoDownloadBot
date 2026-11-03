@@ -26,6 +26,7 @@ import {
   reread,
   samePick,
   saved,
+  selfUpdate,
   sender,
   shown,
   sizes,
@@ -36,6 +37,7 @@ import {
   unready,
   unsend,
   unstarted,
+  updateOnce,
   urls,
   videos,
 } from './bot'
@@ -1225,4 +1227,104 @@ test('unsend: a delete outlasts a long flood wait and server errors, gives up on
     gone.stop()
     busy.stop()
   }
+})
+
+// selfUpdate with tries resolving to codes in turn (yt-dlp's exit code, null
+// when its time limit stopped it) and pauses that pass at once: the first
+// try's code, how many tries ran, the pauses and the lines logged
+async function updated(codes: (number | null)[], waits?: number[]) {
+  let tries = 0
+  const paused: number[] = []
+  const lines: string[] = []
+  const { first, retries } = selfUpdate(
+    async () => codes[tries++]!,
+    waits,
+    async (ms) => void paused.push(ms),
+    (line) => void lines.push(line),
+  )
+  await retries
+  return { first: await first, tries, paused, lines }
+}
+
+test('selfUpdate: a failed try goes again after each wait in turn until one works, every failure logged', async () => {
+  // GitHub's API limit fails the first two tries (yt-dlp exits 100), the third works
+  expect(await updated([100, 100, 0], [60_000, 120_000, 240_000])).toEqual({
+    first: 100,
+    tries: 3,
+    paused: [60_000, 120_000],
+    lines: ['yt-dlp update failed (100), retry 1/3 in 1 min', 'yt-dlp update failed (100), retry 2/3 in 2 min'],
+  })
+  // one that works at once needs no retry
+  expect(await updated([0])).toEqual({ first: 0, tries: 1, paused: [], lines: [] })
+})
+
+test('selfUpdate: by default a failing update is tried again 1, 2, 4, 8, 16 and 32 minutes apart, the last just over an hour after the first, then waits for the next day', async () => {
+  const { tries, paused, lines } = await updated(Array(7).fill(100))
+  expect(tries).toBe(7)
+  expect(paused).toEqual([1, 2, 4, 8, 16, 32].map((m) => m * 60_000))
+  expect(paused.reduce((a, b) => a + b)).toBeGreaterThan(60 * 60_000)
+  expect(lines).toHaveLength(7)
+  expect(lines[0]).toBe('yt-dlp update failed (100), retry 1/6 in 1 min')
+  expect(lines[5]).toBe('yt-dlp update failed (100), retry 6/6 in 32 min')
+  expect(lines[6]).toBe('yt-dlp update failed (100), next try tomorrow')
+})
+
+test('selfUpdate: after a try its time limit stopped, only the last wait and its try are left, and the log says so', async () => {
+  // by default the first one that times out gets one more try, 32 minutes later
+  expect(await updated([null, 0])).toEqual({
+    first: null,
+    tries: 2,
+    paused: [32 * 60_000],
+    lines: ['yt-dlp update timed out, retry 6/6 in 32 min'],
+  })
+  // the try after it is the last, whatever it ends in
+  for (const last of [null, 100])
+    expect(await updated([null, last], [60_000, 120_000])).toEqual({
+      first: null,
+      tries: 2,
+      paused: [120_000],
+      lines: ['yt-dlp update timed out, retry 2/2 in 2 min', `yt-dlp update ${last ? 'failed (100)' : 'timed out'}, next try tomorrow`],
+    })
+  // a time-out after a failure skips to the last wait too, and one at the last try ends the update
+  expect(await updated([100, null, 100], [60_000, 120_000, 240_000])).toEqual({
+    first: 100,
+    tries: 3,
+    paused: [60_000, 240_000],
+    lines: [
+      'yt-dlp update failed (100), retry 1/3 in 1 min',
+      'yt-dlp update timed out, retry 3/3 in 4 min',
+      'yt-dlp update failed (100), next try tomorrow',
+    ],
+  })
+  expect(await updated([100, 100, null], [60_000, 120_000])).toEqual({
+    first: 100,
+    tries: 3,
+    paused: [60_000, 120_000],
+    lines: [
+      'yt-dlp update failed (100), retry 1/2 in 1 min',
+      'yt-dlp update failed (100), retry 2/2 in 2 min',
+      'yt-dlp update timed out, next try tomorrow',
+    ],
+  })
+})
+
+test("updateOnce: a try's exit code, or null when its time limit's SIGTERM stopped it; another signal is an exit code", async () => {
+  expect(await updateOnce(['sh', '-c', 'exit 100'])).toBe(100)
+  expect(await updateOnce(['sh', '-c', 'exit 0'])).toBe(0)
+  expect(await updateOnce(['sleep', '5'], 100)).toBeNull()
+  // an OOM kill or a crash is a failure to try again soon, not a time-out
+  expect(await updateOnce(['sh', '-c', 'kill -KILL $$'])).toBe(137)
+})
+
+test('selfUpdate: the first try is over before its retries, which go on meanwhile', async () => {
+  let tries = 0
+  const resume = Promise.withResolvers<void>()
+  const { first, retries } = selfUpdate(async () => (tries++ ? 0 : 100), [60_000], () => resume.promise, () => {})
+  // the bot starts polling here, while the retry waits out its minute
+  expect(await first).toBe(100)
+  await Bun.sleep(10)
+  expect(tries).toBe(1)
+  resume.resolve()
+  await retries
+  expect(tries).toBe(2)
 })

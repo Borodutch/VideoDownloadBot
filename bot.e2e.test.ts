@@ -1375,3 +1375,30 @@ test.skipIf(skip)(
   },
   30_000,
 )
+
+test.skipIf(skip)(
+  "bot: a self-update that fails at start (GitHub's API limit) holds up neither polling nor downloads, and is tried again a minute later",
+  async () => {
+    // test/yt-dlp fails every self-update try and adds a line to $UPDATES for
+    // it. A minute is 1 s, so the retries come 1, 3, 7, 15, 31 and 63 s after
+    // the first try.
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-updates-'))
+    const updates = join(dir, 'tries')
+    const tries = () => (existsSync(updates) ? readFileSync(updates, 'utf8').split('\n').filter(Boolean).length : 0)
+    const bot = start({ MINUTE_MS: '1000', UPDATES: updates })
+    let jobs: string[] = []
+    try {
+      // the link goes out without waiting for the retries...
+      bot.link(1, 'short1')
+      await bot.until(() => bot.videos().length === 1)
+      // ...and the update is tried again
+      await bot.until(() => tries() >= 2)
+    } finally {
+      jobs = await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+    expect(bot.statuses(1).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(jobs.filter((l) => l.startsWith('job ok '))).toHaveLength(1)
+  },
+  30_000,
+)
