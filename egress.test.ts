@@ -399,3 +399,43 @@ test.skipIf(!ytdlp || !ffmpeg)('yt-dlp: ffmpeg does not fetch an internal segmen
     hls.stop(true)
   }
 }, 60_000)
+
+test('proxy: via hosts go through the upstream proxy, to the checked address only', async () => {
+  const { hits, inside } = inner()
+  const asked: string[] = []
+  // a CONNECT proxy like wireproxy's; refuse=true answers 403 instead
+  const upstream = (refuse: boolean) =>
+    createServer((s) => {
+      s.once('data', (d) => {
+        const target = d.toString().split(' ')[1]!
+        asked.push(target)
+        if (refuse) return s.end('HTTP/1.1 403 Forbidden\r\n\r\n')
+        const [h, p] = [target.slice(0, target.lastIndexOf(':')), target.slice(target.lastIndexOf(':') + 1)]
+        const out = connect({ host: h.replace(/^\[|\]$/g, ''), port: Number(p) }, () => {
+          s.write('HTTP/1.1 200 Connection established\r\n\r\n')
+          s.pipe(out).pipe(s)
+        })
+      }).on('error', () => {})
+    })
+  const ok = upstream(false)
+  const no = upstream(true)
+  await Promise.all([ok, no].map((u) => new Promise<void>((r) => u.listen(0, '127.0.0.1', r))))
+  const at = (u: typeof ok) => `127.0.0.1:${(u.address() as AddressInfo).port}`
+  try {
+    const host = new URL(inside).host
+    const req = `CONNECT ${host} HTTP/1.1\r\n\r\nGET /w HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`
+    const through = await raw(await egressProxy(() => true, undefined, () => at(ok)), req)
+    expect(through).toStartWith('HTTP/1.1 200 Connection Established\r\n\r\nHTTP/1.1 200')
+    const plain = `GET ${inside}/g HTTP/1.1\r\nHost: x\r\n\r\n`
+    expect(await raw(await egressProxy(() => true, undefined, () => at(ok)), plain)).toEndWith('secret')
+    expect(asked).toEqual([host, host])
+    expect(hits).toEqual(['/w', '/g'])
+    // a refusing upstream is a 502; an internal address never reaches the upstream
+    expect(await raw(await egressProxy(() => true, undefined, () => at(no)), req)).toStartWith('HTTP/1.1 502')
+    expect(await raw(await egressProxy(undefined, undefined, () => at(ok)), req)).toStartWith('HTTP/1.1 403')
+    expect(asked).toEqual([host, host, host])
+  } finally {
+    ok.close()
+    no.close()
+  }
+})

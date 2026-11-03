@@ -107,7 +107,12 @@ function readHead(client: Socket) {
   })
 }
 
-async function serve(client: Socket, allow: (ip: string) => boolean, idle: number) {
+// via(host) names an HTTP proxy (host:port) to reach that host through, the
+// WARP tunnel for YouTube (#415); the address is still checked here first and
+// the tunnel is asked for that very address, never the name
+export type Via = (host: string) => string | undefined
+
+async function serve(client: Socket, allow: (ip: string) => boolean, idle: number, via: Via) {
   client.setTimeout(5 * 60_000, () => client.destroy())
   client.on('error', () => {})
   const head = await readHead(client)
@@ -173,7 +178,8 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
   }
   // gone while resolving
   if (client.destroyed) return
-  const upstream = connect({ host: ip, port })
+  const hop2 = via(host)
+  const upstream = connect(hop2 ? connectTarget(hop2) : { host: ip, port })
   let open = false
   // close the client too: a destroyed upstream doesn't end the piped client
   // on Node, and yt-dlp would sit on a dead connection
@@ -185,7 +191,19 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
     open ? client.destroy() : reply(client, '502 Bad Gateway'),
   )
   client.on('close', () => upstream.destroy())
-  upstream.once('connect', () => {
+  // through via's proxy: CONNECT to the checked address, then on as if direct
+  const tunnel = async () => {
+    const at = isIP(ip) === 6 ? `[${ip}]:${port}` : `${ip}:${port}`
+    upstream.write(`CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\n\r\n`)
+    const answer = await readHead(upstream)
+    if (!answer || !/^HTTP\/1\.[01] 200 /.test(answer.toString('latin1'))) {
+      upstream.destroy()
+      return reply(client, '502 Bad Gateway')
+    }
+    go()
+  }
+  upstream.once('connect', () => (hop2 ? void tunnel() : go()))
+  const go = () => {
     open = true
     const rest = head.subarray(end + 4)
     if (request) {
@@ -206,13 +224,19 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
       client.pipe(upstream)
     }
     upstream.pipe(client)
+    // readHead paused it after the tunnel's answer; Bun's pipe doesn't resume
+    upstream.resume()
     if (!upstream.writableNeedDrain) client.resume()
-  })
+  }
 }
 
 // Listens on loopback only; resolves to the proxy URL for --proxy
-export function egressProxy(allow = (ip: string) => isPublicIp(ip), upstreamIdle = 5 * 60_000) {
-  const server = createServer((s) => void serve(s, allow, upstreamIdle).catch(() => s.destroy()))
+export function egressProxy(
+  allow = (ip: string) => isPublicIp(ip),
+  upstreamIdle = 5 * 60_000,
+  via: Via = () => undefined,
+) {
+  const server = createServer((s) => void serve(s, allow, upstreamIdle, via).catch(() => s.destroy()))
   return new Promise<string>((ok, fail) => {
     server.once('error', fail)
     server.listen(0, '127.0.0.1', () => {

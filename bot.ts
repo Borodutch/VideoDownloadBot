@@ -254,6 +254,11 @@ function isPublic(host: string) {
 }
 
 let proxy: Promise<string> | undefined
+// YouTube blocks the server's own address (#415), so its hosts go out through
+// Cloudflare WARP: WARP_PROXY is the videodownloadbot-warp service's HTTP proxy
+// (host:port, wireproxy from the Dockerfile's warp stage)
+export const YOUTUBE = /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com|googlevideo\.com|ytimg\.com)\.?$/i
+const warp = (host: string) => (env.WARP_PROXY && YOUTUBE.test(host) ? env.WARP_PROXY : undefined)
 // ponytail: in-process daily self-update; pin a version if nightly ever breaks
 // The update swaps the binary out, so a run started meanwhile waits for it
 // (else spawn fails with "Executable not found"); it takes seconds, and a
@@ -324,7 +329,7 @@ export class Timeout extends Error {}
 // closes within 5 s of the stop
 async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal) {
   // a failed listen isn't kept: the next download tries again
-  proxy ??= egressProxy().catch((e) => {
+  proxy ??= egressProxy(undefined, undefined, warp).catch((e) => {
     proxy = undefined
     throw e
   })
