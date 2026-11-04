@@ -113,7 +113,6 @@ test('links: replied-to links only when summoned', () => {
   expect(links(ask('@VidBot please'), me)).toEqual(['https://youtu.be/a'])
   expect(links(ask('nice video'), me)).toEqual([])
   expect(links(ask('@vidbotx'), me)).toEqual([])
-  expect(links(ask('hey'), me, true)).toEqual(['https://youtu.be/a'])
 })
 
 const said = (text: string) => {
@@ -142,6 +141,25 @@ test('requested: unless summoned, groups only check links with yt-dlp', async ()
   expect(checked.length).toBe(1)
 })
 
+test('requested: a guest message is checked as in a group, unless it mentions the bot', async () => {
+  const checked: string[][] = []
+  const video = async (u: string[]) => (checked.push(u), u.slice(1))
+  // Telegram calls the bot on a plain reply to one of its messages, mention
+  // or not; the bot's message asks for nothing
+  const reply_to_message = { ...said('youtu.be/v'), from: { id: me.id, is_bot: true, first_name: 'Vid' } } as Message
+  const reply = (text: string) => ({ ...said(text), reply_to_message }) as Message
+  expect(await requested(reply('source: tugport.com and youtu.be/x'), me, 'guest', video)).toEqual(['https://youtu.be/x'])
+  expect(checked).toEqual([['https://tugport.com/', 'https://youtu.be/x']])
+  // a mention takes any link; no link, nothing to check
+  expect(await requested(reply('@VidBot tugport.com'), me, 'guest', video)).toEqual(['https://tugport.com/'])
+  expect(await requested(reply('lol'), me, 'guest', video)).toEqual([])
+  expect(checked.length).toBe(1)
+  // without a mention, someone else's message replied to asks for nothing
+  // either, as in a group
+  const theirs = { ...said('look youtu.be/a'), reply_to_message: said('youtu.be/b') } as Message
+  expect(await requested(theirs, me, 'guest', async (u) => u)).toEqual(['https://youtu.be/a'])
+})
+
 test("links: the bot's own messages ask for nothing, forwarded or replied to", async () => {
   // one of its videos as it went out: the title linked to the source, then
   // the mention (options() in main)
@@ -165,8 +183,7 @@ test("links: the bot's own messages ask for nothing, forwarded or replied to", a
   const all = async (u: string[]) => (checked.push(u), u)
   for (const m of [forwarded, through]) {
     expect(links(m, me)).toEqual([])
-    expect(links(m, me, true)).toEqual([])
-    for (const chat of ['private', 'group', 'supergroup'])
+    for (const chat of ['private', 'group', 'supergroup', 'guest'])
       expect(await requested(m, me, chat, all)).toEqual([])
   }
   expect(checked).toEqual([])
@@ -176,7 +193,7 @@ test("links: the bot's own messages ask for nothing, forwarded or replied to", a
     ({ ...said(text), reply_to_message }) as Message
   for (const r of [video({ from: bot }), forwarded, through]) {
     expect(links(ask(r), me)).toEqual([])
-    expect(links(ask(r), me, true)).toEqual([])
+    expect(await requested(ask(r), me, 'guest', all)).toEqual([])
     expect(links(ask(r, '@VidBot youtu.be/a'), me)).toEqual(['https://youtu.be/a'])
   }
   // the same video forwarded from anyone else, or sent through another bot,
@@ -223,8 +240,7 @@ test('links: a copy of a file the bot has sent asks for nothing, as the message 
   const all = async (u: string[]) => (checked.push(u), u)
   for (const m of copies) {
     expect(links(m, bot)).toEqual([])
-    expect(links(m, bot, true)).toEqual([])
-    for (const chat of ['private', 'group', 'supergroup'])
+    for (const chat of ['private', 'group', 'supergroup', 'guest'])
       expect(await requested(m, bot, chat, all)).toEqual([])
   }
   expect(checked).toEqual([])
@@ -234,7 +250,7 @@ test('links: a copy of a file the bot has sent asks for nothing, as the message 
     ({ ...said(text), reply_to_message }) as Message
   for (const r of copies) {
     expect(links(ask(r), bot)).toEqual([])
-    expect(links(ask(r), bot, true)).toEqual([])
+    expect(await requested(ask(r), bot, 'guest', all)).toEqual([])
     expect(links(ask(r, '@VidBot youtu.be/a'), bot)).toEqual(['https://youtu.be/a'])
   }
   // the same message with a file the bot hasn't sent is a request like any

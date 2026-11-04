@@ -211,14 +211,20 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
         },
       } as { update_id: number })
     },
-    // as a guest message (query q<user>), the bot summoned with the link in a
-    // chat it isn't in; or there, about its own video of v: 'forward' is
-    // that video forwarded, 'reply' a plain reply to it ("lol"), which
-    // Telegram calls the bot on as well, 'mention' the bot mentioned in
-    // reply to it
-    guest(user: number, v: string, about?: 'forward' | 'reply' | 'mention') {
+    // as a guest message (query q<user>) in user's private chat with someone
+    // else: the bot mentioned with the link to v (Telegram doesn't call it on
+    // a link alone), or about its own video of v: 'forward' is that video
+    // forwarded, 'reply' a plain reply to it ("lol"), which Telegram calls
+    // the bot on as well, 'mention' the bot mentioned in reply to it. With
+    // link, the reply carries that link of its own after its words.
+    guest(user: number, v: string, about?: 'forward' | 'reply' | 'mention', link?: string) {
       const { text, entities, ...m } = message(user, v)
-      const reply = (said: string) => ({ text: said, entities: [], reply_to_message: { ...sent(v), chat: m.chat, from: me } })
+      // words, then a url entity for url
+      const say = (words: string, url?: string) => {
+        const all = url ? `${words} ${url}` : words
+        return { text: all, entities: url ? [{ type: 'url', offset: all.length - url.length, length: url.length }] : [] }
+      }
+      const reply = (words: string) => ({ ...say(words, link), reply_to_message: { ...sent(v), chat: m.chat, from: me } })
       updates.push({
         update_id: updates.length + 1,
         guest_message: {
@@ -229,7 +235,7 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
               ? reply('lol')
               : about === 'mention'
                 ? reply(`@${me.username}`)
-                : { text, entities }),
+                : say(`@${me.username}`, text)),
           guest_query_id: `q${user}`,
         },
       } as { update_id: number })
@@ -549,6 +555,47 @@ test.skipIf(skip)(
     expect(theirs.map((c) => [c.query, c.method, c.text])).toEqual([['q4', 'answerGuestQuery', t('en', 'help')]])
     expect(bot.videos()).toHaveLength(0)
     expect(jobs).toHaveLength(0)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a link in a plain reply to its video is only a request on a video site, any link with a mention",
+  async () => {
+    const bot = start({ STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    // a page no site's extractor claims, and where -J finds no video (test/yt-dlp)
+    const article = 'https://example.com/article'
+    try {
+      // (these come from private chats, see guest(): a guest message is
+      // checked there as in a group all the same)
+      bot.guest(2, 'short2', 'reply', article)
+      bot.guest(3, 'short3', 'reply', 'https://www.youtube.com/watch?v=short5')
+      bot.guest(4, 'short4', 'mention', article)
+      // the YouTube video is edited in, and the mention hears the article has none
+      await bot.until(
+        () => bot.calls.some((c) => c.method === 'editMessageMedia') && bot.inline().includes(t('en', 'failed')),
+      )
+    } finally {
+      // the drain lets every handler finish, so whatever the article's plain
+      // reply was going to say is in by then
+      jobs = await bot.stop()
+    }
+    // no answer for the article's plain reply (methods and texts only: a
+    // failing toEqual on the calls would print an upload's every byte)
+    const answers = bot.calls.filter((c) => c.query).map((c) => [c.query, c.method, c.text])
+    expect(answers.sort()).toEqual([
+      ['q3', 'answerGuestQuery', t('en', 'downloading')],
+      ['q4', 'answerGuestQuery', t('en', 'downloading')],
+    ])
+    // the YouTube link's video went out (through the storage chat), the
+    // article's one job found nothing
+    expect(bot.videos().map((v) => v.chat)).toEqual([9])
+    expect(bot.calls.filter((c) => c.method === 'editMessageMedia')).toHaveLength(1)
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' ')).sort()).toEqual([
+      'fail:quiet host=example.com',
+      'ok host=www.youtube.com',
+    ])
   },
   30_000,
 )

@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
-// Stands in for yt-dlp in bot.e2e.test.ts: -J describes the link (one with
-// "long" in it is a 50-minute video, one with "slow" takes 3 s to describe,
-// one with "fail" is unavailable, one with "tweet" is a tweet without a video,
+// Stands in for yt-dlp in bot.e2e.test.ts: --list-extractors lists every link
+// under the generic extractor and a YouTube one under youtube too, -J finds
+// no video on a page off YouTube (an article) and describes a YouTube link
+// (one with "long" in it is a 50-minute video, one with "slow" takes 3 s to
+// describe, one with "fail" is unavailable, one with "tweet" is a tweet without a video,
 // one with "reel" in it is an Instagram reel and one with "stream" in it a
 // stream, neither saying how long it is; the video's id is the v= parameter,
 // the format it picks "a", or "b" for one with "swap" in it when the page has
@@ -72,12 +74,24 @@ if (args.includes('--update-to') && process.env.UPDATES) {
   )
   process.exit(100)
 }
-if (args.includes('--update-to') || args.includes('--list-extractors')) process.exit(0)
+if (args.includes('--update-to')) process.exit(0)
+const youtube = (link: string) => /^(www\.)?(youtube\.com|youtu\.be)$/.test(new URL(link).hostname)
+if (args.includes('--list-extractors')) {
+  // each extractor's name, then the links it claims, as yt-dlp prints them
+  const links = args.slice(args.indexOf('--') + 1)
+  const list = (ie: string, claimed: string[]) => [ie, ...claimed.map((link) => `  ${link}`)]
+  console.log([...list('generic', links), ...list('youtube', links.filter(youtube))].join('\n'))
+  process.exit(0)
+}
 const info = args.indexOf('--load-info-json')
 const loaded = info >= 0 ? JSON.parse(readFileSync(args[info + 1]!, 'utf8')) : undefined
 // a playlist's saved info has nothing to download but its page
 const saved = loaded?._type === 'playlist' ? undefined : loaded
 const url: string = loaded ? loaded.webpage_url : args.findLast((a) => a.startsWith('https://'))!
+if (args.includes('-J') && !youtube(url)) {
+  console.error(`ERROR: Unsupported URL: ${url}`)
+  process.exit(1)
+}
 const id = new URL(url).searchParams.get('v')!
 const long = url.includes('long')
 const reel = url.includes('reel')

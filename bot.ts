@@ -190,9 +190,9 @@ export function urls(msg: Message) {
   ]
 }
 
-// Called on: by an @mention, or in a guest message
-export const summoned = (msg: Message, username: string, guest = false) =>
-  guest || new RegExp(`@${username}\\b`, 'i').test(msg.text ?? msg.caption ?? '')
+// Called on by an @mention
+export const summoned = (msg: Message, username: string) =>
+  new RegExp(`@${username}\\b`, 'i').test(msg.text ?? msg.caption ?? '')
 
 // The bot, as getMe has it, and whether a file (its file_unique_id) is the
 // bot's: one it has sent
@@ -216,9 +216,9 @@ export const own = (msg: Message, me: Me) => {
 
 // Also the links in the message replied to when the bot is summoned. The
 // bot's own messages ask for nothing, as the message or the one replied to.
-export function links(msg: Message, me: Me, guest = false) {
+export function links(msg: Message, me: Me) {
   if (own(msg, me)) return []
-  const reply = summoned(msg, me.username, guest) ? msg.reply_to_message : undefined
+  const reply = summoned(msg, me.username) ? msg.reply_to_message : undefined
   const theirs = reply && reply.from?.id !== me.id && !own(reply, me) ? urls(reply) : []
   return [...new Set([...urls(msg), ...theirs])]
 }
@@ -249,7 +249,9 @@ export async function videos(urls: string[]) {
 
 // What a message asks to download. In groups a link mentioned in passing
 // (a bare domain, an article) isn't a request: unless the bot is summoned,
-// only links to a site yt-dlp knows count.
+// only links to a site yt-dlp knows count. The same goes for a guest message
+// (chat 'guest') in any chat, a private one too: Telegram calls the bot on a
+// plain reply to one of its messages as well, mention or not.
 export async function requested(
   msg: Message,
   me: Me,
@@ -1576,11 +1578,14 @@ function main() {
     const msg = ctx.guestMessage!
     const lang = ctx.from?.language_code
     const me = { ...ctx.me, mine }
-    const url = links(msg, me, true)[0]
-    // Telegram calls it on a plain reply to one of its messages too, so one
-    // that asks for nothing ("thanks" under its video) gets the help only if
-    // it mentions the bot; its own message forwarded or copied here, mention
-    // and all, gets nothing either
+    // Telegram calls it on a plain reply to one of its messages too, so as
+    // in a group a link in one that doesn't mention the bot only counts on a
+    // site yt-dlp knows. Unlike a group's, its answer comes before -J: a
+    // page without a video there (a news site's article, a tweet without
+    // one) still hears "Downloading…", then the failure. One that asks for
+    // nothing ("thanks") gets the help only if it mentions the bot; its own
+    // message forwarded or copied here, mention and all, gets nothing either.
+    const url = (await requested(msg, me, 'guest'))[0]
     if (!url && (own(msg, me) || !summoned(msg, me.username))) return
     const { inline_message_id: id } = await ctx.answerGuestQuery({
       type: 'article',
