@@ -15,13 +15,11 @@ jobs:
     runs-on: ${{ (github.event_name != 'pull_request' || contains(fromJSON('["backmeupplz","renovate","claude","radiant"]'), github.event.pull_request.user.login)) && 'macos-latest' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: https://github.com/oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.4
-      - run: bun install --frozen-lockfile
       # The egress tests drive the real yt-dlp and ffmpeg the image ships (yt-dlp nightly). The Mac uses Homebrew's
       # ffmpeg and keeps the nightly yt-dlp in its tool cache, refreshed daily: the Python zipapp, since the one-file
-      # yt-dlp_macos unpacks itself on every call (5-6 s each vs 0.5 s). Linux installs both each run.
+      # yt-dlp_macos unpacks itself on every call (5-6 s each vs 0.5 s). Linux installs both each run. A line added to
+      # $GITHUB_PATH later goes first in PATH: these steps come before setup-bun, so that its Bun wins over the one in
+      # /opt/homebrew/bin, and the Mac adds the nightly yt-dlp after /opt/homebrew/bin, so that it wins over Homebrew's.
       - name: yt-dlp and ffmpeg (Mac)
         if: runner.os == 'macOS'
         run: |
@@ -31,8 +29,8 @@ jobs:
             curl -fsSL -o "$dir/yt-dlp" https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp
             chmod +x "$dir/yt-dlp"
           fi
-          echo "$dir" >> "$GITHUB_PATH"
           echo /opt/homebrew/bin >> "$GITHUB_PATH"
+          echo "$dir" >> "$GITHUB_PATH"
       - name: yt-dlp and ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -43,6 +41,12 @@ jobs:
           curl -fsSL -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp_linux
           chmod +x bin/yt-dlp
           echo "$PWD/bin" >> "$GITHUB_PATH"
+      - uses: https://github.com/oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      # The bun, bunx (which runs tsc), yt-dlp and ffmpeg this job runs, as PATH finds them
+      - run: which bun bunx yt-dlp ffmpeg ffprobe && yt-dlp --version
       - run: bunx -p typescript tsc
       # The files run in parallel workers, and the bot and egress tests all at once (bunfig.toml): each e2e test runs its own
       # bot, and none races a timer it doesn't control
