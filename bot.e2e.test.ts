@@ -26,6 +26,7 @@ type Call = {
   title?: string
   performer?: string
   duration?: number
+  unique?: string
 }
 // The video every fake download copies (FAKE_MP4), made once: an ffmpeg run
 // per test, in spawnSync, would hold up all the concurrent ones (0.4 s each)
@@ -69,7 +70,7 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       const media = [body.video, body.audio]
         .map((x) => (typeof x === 'string' && x.startsWith('attach://') ? body[x.slice(9)] : x))
         .find((x) => x instanceof Blob)
-      const call = {
+      const call: Call = {
         method,
         chat: chat.id,
         text: body.text ?? body.result?.input_message_content?.message_text,
@@ -88,19 +89,22 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       else if (ms) await Bun.sleep(ms)
       if (method === 'answerGuestQuery') return ok({ inline_message_id: `g${++id}` })
       if (method === 'sendMessage') return ok({ message_id: ++id, date: 0, chat, text: body.text })
-      // cached file_ids "unsized…" went out without a size, as before #281
-      if (method === 'sendVideo')
+      // cached file_ids "unsized…" went out without a size, as before #281;
+      // unique = the file_unique_id the video went out with
+      if (method === 'sendVideo') {
+        call.unique = `u${++id}`
         return ok({
-          message_id: ++id,
+          message_id: id,
           date: 0,
           chat,
           video: {
             file_id: `v${id}`,
-            file_unique_id: `u${id}`,
+            file_unique_id: call.unique,
             ...(String(body.video).startsWith('unsized') ? {} : { width: 320, height: 240 }),
             duration: 1,
           },
         })
+      }
       if (method === 'sendAudio')
         return ok({ message_id: ++id, date: 0, chat, audio: { file_id: `a${id}`, file_unique_id: `u${id}`, duration: 1 } })
       return ok(true)
@@ -162,6 +166,19 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     caption_entities: [{ type: 'text_link', offset: 0, length: v.length, url: `https://www.youtube.com/watch?v=${v}` }],
   })
   const forwarded = { forward_origin: { type: 'user', date: 0, sender_user: me } }
+  // that video posted by user 9 into chat (a group when it's negative, else
+  // that user's chat with the bot) with extra on top; returns the message
+  const post = (chat: number, v: string, extra: object) => {
+    const user = chat < 0 ? 9 : chat
+    const message = {
+      ...sent(v),
+      chat: chat < 0 ? { id: chat, type: 'supergroup', title: 'g' } : { id: chat, type: 'private', first_name: 'u' },
+      from: { id: user, is_bot: false, first_name: 'u', language_code: 'en' },
+      ...extra,
+    }
+    updates.push({ update_id: updates.length + 1, message } as { update_id: number })
+    return message
+  }
   return {
     calls,
     // FAKE_MP4's bytes, which a download copies
@@ -170,17 +187,27 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     link(user: number, v: string) {
       updates.push({ update_id: updates.length + 1, message: message(user, v) } as { update_id: number })
     },
-    // the bot's own video of v forwarded by user 9 into chat: a group when
-    // it's negative, else that user's chat with the bot
+    // the bot's own video of v forwarded by user 9 into chat (post)
     forward(chat: number, v: string) {
-      const user = chat < 0 ? 9 : chat
+      post(chat, v, forwarded)
+    },
+    // a copy of it (forwarded with the sender hidden, or by a client), with
+    // nothing of the bot's but the file, unique (its file_unique_id); returns
+    // the message
+    copy: (chat: number, v: string, unique: string) =>
+      post(chat, v, { video: { file_id: 'c', file_unique_id: unique, width: 320, height: 240, duration: 1 } }),
+    // user 9 mentioning the bot in group chat, in reply to message to
+    mention(chat: number, to: object) {
       updates.push({
         update_id: updates.length + 1,
         message: {
-          ...sent(v),
-          chat: chat < 0 ? { id: chat, type: 'supergroup', title: 'g' } : { id: chat, type: 'private', first_name: 'u' },
-          from: { id: user, is_bot: false, first_name: 'u', language_code: 'en' },
-          ...forwarded,
+          message_id: ++id,
+          date: 0,
+          chat: { id: chat, type: 'supergroup', title: 'g' },
+          from: { id: 9, is_bot: false, first_name: 'u', language_code: 'en' },
+          text: `@${me.username}`,
+          entities: [{ type: 'mention', offset: 0, length: me.username.length + 1 }],
+          reply_to_message: to,
         },
       } as { update_id: number })
     },
@@ -203,6 +230,24 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
               : about === 'mention'
                 ? reply(`@${me.username}`)
                 : { text, entities }),
+          guest_query_id: `q${user}`,
+        },
+      } as { update_id: number })
+    },
+    // as a guest message (query q<user>) in a chat the bot isn't in: a copy
+    // of its video of v, whose caption mentions it, file = the copy's
+    // file_unique_id (copy); with mention, the bot mentioned in reply to
+    // such a copy instead
+    guestCopy(user: number, v: string, file: string, mention = false) {
+      const { text, entities, ...m } = message(user, v)
+      const copy = { ...sent(v), video: { file_id: 'c', file_unique_id: file, width: 320, height: 240, duration: 1 } }
+      updates.push({
+        update_id: updates.length + 1,
+        guest_message: {
+          ...m,
+          ...(mention
+            ? { text: `@${me.username}`, entities: [], reply_to_message: { ...copy, chat: m.chat, from: m.from } }
+            : copy),
           guest_query_id: `q${user}`,
         },
       } as { update_id: number })
@@ -231,6 +276,8 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       const said = (word: string) => lines.some((l) => l.startsWith(word))
       await this.until(() => said('draining ') && (env.CUT_MS !== '0' || said('cut ')))
     },
+    // whether the bot's process is still running
+    running: () => bot.exitCode === null && bot.signalCode === null,
     // the exit, when nothing that's still running may finish
     kill() {
       bot.kill('SIGKILL')
@@ -502,6 +549,93 @@ test.skipIf(skip)(
     expect(theirs.map((c) => [c.query, c.method, c.text])).toEqual([['q4', 'answerGuestQuery', t('en', 'help')]])
     expect(bot.videos()).toHaveLength(0)
     expect(jobs).toHaveLength(0)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  'bot: a copy of its own video (forwarded with the sender hidden) gets no answer in a group, in private or where it is a guest, nor does a mention in reply to it take its link',
+  async () => {
+    // short7 was cached before the bot kept the files it sends: its file
+    // becomes the bot's own when it goes out again, from the cache
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    db.run("INSERT INTO files VALUES (?, 'video', 'old7', 'Video', ?)", [link('short7'), link('short7')])
+    db.close()
+    const bot = start({ DATA_DIR: data })
+    let jobs: string[] = []
+    try {
+      bot.link(2, 'short1')
+      bot.link(6, 'short7')
+      await bot.until(() => bot.videos().length === 2)
+      const unique = (chat: number) => bot.videos().find((v) => v.chat === chat)!.unique!
+      // copies of both in a group, with a mention in reply to one, and in a
+      // private chat
+      bot.mention(-100, bot.copy(-100, 'short1', unique(2)))
+      bot.copy(-100, 'short7', unique(6))
+      bot.copy(4, 'short1', unique(2))
+      bot.copy(4, 'short7', unique(6))
+      // in chats it isn't in: a copy, and a mention in reply to one
+      bot.guestCopy(7, 'short1', unique(2))
+      bot.guestCopy(8, 'short7', unique(6), true)
+      // the same message with a file the bot hasn't sent (user 5's own
+      // upload) is a request like any other
+      bot.copy(5, 'short5', 'theirs')
+      // a link sent after them: once its video is out, they've been handled
+      bot.link(3, 'short3')
+      await bot.until(() => bot.videos().length === 4 && bot.calls.some((c) => c.query === 'q8'))
+    } finally {
+      jobs = await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // no download, status or help text for the copies or the mention
+    // (methods only: a failing toEqual on the calls would print an upload's
+    // every byte)
+    expect(bot.calls.filter((c) => c.chat === -100 || c.chat === 4).map((c) => [c.chat, c.method])).toEqual([])
+    // where it's a guest, the copy gets no answer, and the mention the help
+    // rather than the copy's video again
+    expect(bot.calls.filter((c) => c.query || c.inline).map((c) => [c.query, c.method, c.text])).toEqual([
+      ['q8', 'answerGuestQuery', t('en', 'help')],
+    ])
+    expect(bot.videos().map((v) => [v.chat, v.upload]).sort()).toEqual([
+      [2, true],
+      [3, true],
+      [5, true],
+      [6, false],
+    ])
+    expect(jobs.length).toBe(3)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a deploy's handover holding the database's write lock holds up its start rather than ending it",
+  async () => {
+    // the old container, still polling, has the write lock as the new one
+    // starts, on a database with the tables the bot had before sent (files,
+    // sized): creating sent waits for it
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    db.run('CREATE TABLE sized (file_id TEXT PRIMARY KEY)')
+    db.run('BEGIN IMMEDIATE')
+    const bot = start({ DATA_DIR: data })
+    let jobs: string[] = []
+    try {
+      // without the wait it would have stopped at once
+      await Bun.sleep(2000)
+      expect(bot.running()).toBe(true)
+      db.run('COMMIT')
+      bot.link(1, 'short1')
+      await bot.until(() => bot.videos().length === 1)
+    } finally {
+      db.close()
+      jobs = await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    expect(jobs.length).toBe(1)
   },
   30_000,
 )

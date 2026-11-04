@@ -194,21 +194,32 @@ export function urls(msg: Message) {
 export const summoned = (msg: Message, username: string, guest = false) =>
   guest || new RegExp(`@${username}\\b`, 'i').test(msg.text ?? msg.caption ?? '')
 
-type Me = { id: number; username: string }
+// The bot, as getMe has it, and whether a file (its file_unique_id) is the
+// bot's: one it has sent
+type Me = { id: number; username: string; mine: (file: string) => boolean }
 
-// A forward of the bot's own message, or one sent through it (inline). Its
-// videos' captions have the link and the @mention that ask it for the video,
-// so its video forwarded into another chat it's in would go out there twice.
-export const own = (msg: Message, me: number) =>
-  msg.via_bot?.id === me ||
-  (msg.forward_origin?.type === 'user' && msg.forward_origin.sender_user.id === me)
+// The bot's own message: a forward of one, one sent through it (inline), or
+// one with a file the bot has sent. A forward that hides the sender's name,
+// or a copy a client or another bot makes, comes as the sender's own message
+// with nothing of the bot's left but the file, whose file_unique_id is the
+// same in every chat. Its videos' captions have the link and the @mention
+// that ask it for the video, so its video forwarded into another chat it's
+// in would go out there twice.
+export const own = (msg: Message, me: Me) => {
+  const file = msg.video ?? msg.animation ?? msg.audio ?? msg.document
+  return (
+    msg.via_bot?.id === me.id ||
+    (msg.forward_origin?.type === 'user' && msg.forward_origin.sender_user.id === me.id) ||
+    (!!file && me.mine(file.file_unique_id))
+  )
+}
 
 // Also the links in the message replied to when the bot is summoned. The
 // bot's own messages ask for nothing, as the message or the one replied to.
 export function links(msg: Message, me: Me, guest = false) {
-  if (own(msg, me.id)) return []
+  if (own(msg, me)) return []
   const reply = summoned(msg, me.username, guest) ? msg.reply_to_message : undefined
-  const theirs = reply && reply.from?.id !== me.id && !own(reply, me.id) ? urls(reply) : []
+  const theirs = reply && reply.from?.id !== me.id && !own(reply, me) ? urls(reply) : []
   return [...new Set([...urls(msg), ...theirs])]
 }
 
@@ -799,8 +810,8 @@ export async function unsend(
 }
 
 // Sends a file to dest.chat as kind; returns the kind it went as, its file_id
-// and the message
-export const sender = (api: Api) =>
+// and the message. kept hears the file_unique_id of every file that goes out.
+export const sender = (api: Api, kept: (file: string) => void = () => {}) =>
   async function send(
     dest: Dest,
     kind: Kind,
@@ -834,6 +845,7 @@ export const sender = (api: Api) =>
     const media = m.video ?? m.animation ?? m.audio ?? m.document
     dest.sent = m.message_id
     if (!media) throw new Error('no file in sent message')
+    kept(media.file_unique_id)
     const sent = m.video
       ? 'video'
       : m.animation
@@ -986,6 +998,12 @@ export const outcome = (e: unknown) =>
 
 function main() {
   const db = new Database(join(DATA, 'bot.sqlite'), { create: true })
+  // During a deploy's handover the old container, still polling, writes to
+  // this file on nearly every update (census): the tables set up below wait
+  // up to 10 s for its write lock (a new one, like sent, needs it) rather
+  // than stop this container's start. After them a lock fails at once, as
+  // before.
+  db.run('PRAGMA busy_timeout = 10000')
   db.run(
     'CREATE TABLE IF NOT EXISTS files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)',
   )
@@ -1006,6 +1024,26 @@ function main() {
     db.query('UPDATE files SET kind = ?, file_id = ? WHERE file_id = ?').run(f.kind, f.file_id, old)
   const forget = (f: File) =>
     db.query('DELETE FROM files WHERE file_id = ?').run(f.file_id)
+  // The files it has sent, by file_unique_id: a copy of one is its own
+  // message (own()). A video cached before this table joins it the next time
+  // it goes out; until then a copy of it counts as anyone's. A table of its
+  // own, as sized. A failed write or read only lets a copy through.
+  db.run('CREATE TABLE IF NOT EXISTS sent (file TEXT PRIMARY KEY)')
+  const keep = (file: string) => {
+    try {
+      db.query('INSERT OR IGNORE INTO sent VALUES (?)').run(file)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+  const mine = (file: string) => {
+    try {
+      return !!db.query('SELECT 1 FROM sent WHERE file = ?').get(file)
+    } catch (e) {
+      console.error(e)
+      return false
+    }
+  }
   const people = census(db)
   Bun.serve({
     port: Number(env.STATS_PORT || 8080),
@@ -1016,6 +1054,7 @@ function main() {
   })
 
   const promo = promos(db)
+  db.run('PRAGMA busy_timeout = 0')
   const bot = new Bot(env.TOKEN!, {
     client: { apiRoot: API, timeoutSeconds: 3600 },
   })
@@ -1042,7 +1081,7 @@ function main() {
   const help = (ctx: Context) =>
     void track(ctx.reply(t(ctx.from?.language_code, 'help')).catch(console.error))
 
-  const send = sender(bot.api)
+  const send = sender(bot.api, keep)
 
   const options = (dest: Dest, f: Pick<File, 'title' | 'url'>): Opts => ({
     caption:
@@ -1536,12 +1575,13 @@ function main() {
   async function guest(ctx: Context) {
     const msg = ctx.guestMessage!
     const lang = ctx.from?.language_code
-    const url = links(msg, ctx.me, true)[0]
+    const me = { ...ctx.me, mine }
+    const url = links(msg, me, true)[0]
     // Telegram calls it on a plain reply to one of its messages too, so one
     // that asks for nothing ("thanks" under its video) gets the help only if
-    // it mentions the bot; its own message forwarded here, mention and all,
-    // gets nothing either
-    if (!url && (own(msg, ctx.me.id) || !summoned(msg, ctx.me.username))) return
+    // it mentions the bot; its own message forwarded or copied here, mention
+    // and all, gets nothing either
+    if (!url && (own(msg, me) || !summoned(msg, me.username))) return
     const { inline_message_id: id } = await ctx.answerGuestQuery({
       type: 'article',
       id: 'status',
@@ -1595,12 +1635,13 @@ function main() {
     help(ctx)
   })
   bot.on('message', (ctx) => {
-    // its own videos forwarded to it get no answer, not even the help
-    if (own(ctx.msg, ctx.me.id)) return
-    const found = links(ctx.msg, ctx.me)
+    const me = { ...ctx.me, mine }
+    // its own videos forwarded or copied to it get no answer, not even the help
+    if (own(ctx.msg, me)) return
+    const found = links(ctx.msg, me)
     // handlers run detached so one long download doesn't block the next update
     void track(
-      requested(ctx.msg, ctx.me, ctx.chat.type)
+      requested(ctx.msg, me, ctx.chat.type)
         .then((wanted) => wanted.forEach((url) => void track(handle(ctx, url))))
         .catch(console.error),
     )

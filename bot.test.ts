@@ -101,8 +101,8 @@ test('lang: telegram codes map to the right locale', () => {
   expect(lang(undefined)).toBe('en')
 })
 
-// the bot, as getMe has it
-const me = { id: 7, username: 'vidbot' }
+// the bot, as getMe has it, with no file of its own yet
+const me = { id: 7, username: 'vidbot', mine: (_: string) => false }
 
 test('links: replied-to links only when summoned', () => {
   const reply_to_message = {
@@ -186,6 +186,71 @@ test("links: the bot's own messages ask for nothing, forwarded or replied to", a
     expect(links(ask(m), me)).toEqual([youtube])
   }
   expect(links(ask(video({ from: user })), me)).toEqual([youtube])
+})
+
+test('links: a copy of a file the bot has sent asks for nothing, as the message or the one replied to', async () => {
+  // its video copied (forwarded with the sender hidden, or by a client or
+  // another bot): the caption it went out with, and nothing else of the
+  // bot's but the file, as a video, an animation, an audio or a document
+  const title = 'Never Gonna Give You Up'
+  const file = (file_unique_id: string) => ({ file_id: 'f', file_unique_id, width: 320, height: 240, duration: 1 })
+  const copy = (media: object) =>
+    ({
+      from: { id: 5, is_bot: false, first_name: 'u' },
+      caption: `${title}\n@VidBot`,
+      caption_entities: [{ type: 'text_link', offset: 0, length: title.length, url: youtube }],
+      ...media,
+    }) as Message
+  // the bot, having sent the file "sent"
+  const bot = { ...me, mine: (f: string) => f === 'sent' }
+  // a copy forwarded on keeps the file whatever its origin: a channel's post
+  // that hid the sender, forwarded or sent on into the channel's discussion
+  // group, a copy forwarded by another user (shown or hidden), or a group's
+  // post made as an anonymous admin
+  const channel = { type: 'channel', date: 0, chat: { id: -1001, type: 'channel', title: 'c' }, message_id: 3 }
+  const origins = [
+    { forward_origin: channel },
+    { forward_origin: channel, is_automatic_forward: true },
+    { forward_origin: { type: 'user', date: 0, sender_user: { id: 6, is_bot: false, first_name: 'w' } } },
+    { forward_origin: { type: 'hidden_user', date: 0, sender_user_name: 'w' } },
+    { forward_origin: { type: 'chat', date: 0, sender_chat: { id: -100, type: 'supergroup', title: 'g' } } },
+  ]
+  const copies = [
+    ...['video', 'animation', 'audio', 'document'].map((kind) => copy({ [kind]: file('sent') })),
+    ...origins.map((origin) => copy({ video: file('sent'), ...origin })),
+  ]
+  const checked: string[][] = []
+  const all = async (u: string[]) => (checked.push(u), u)
+  for (const m of copies) {
+    expect(links(m, bot)).toEqual([])
+    expect(links(m, bot, true)).toEqual([])
+    for (const chat of ['private', 'group', 'supergroup'])
+      expect(await requested(m, bot, chat, all)).toEqual([])
+  }
+  expect(checked).toEqual([])
+  // mentioning it in reply to a copy doesn't ask for the video again; a link
+  // in the reply itself still counts
+  const ask = (reply_to_message: Message, text = '@VidBot thanks') =>
+    ({ ...said(text), reply_to_message }) as Message
+  for (const r of copies) {
+    expect(links(ask(r), bot)).toEqual([])
+    expect(links(ask(r), bot, true)).toEqual([])
+    expect(links(ask(r, '@VidBot youtu.be/a'), bot)).toEqual(['https://youtu.be/a'])
+  }
+  // the same message with a file the bot hasn't sent is a request like any
+  // other, forwarded from anywhere and replied to as well, and so is a
+  // user's own upload with a link in its caption, checked with yt-dlp in a
+  // group as before
+  for (const theirs of [copy({ video: file('theirs') }), ...origins.map((o) => copy({ video: file('theirs'), ...o }))]) {
+    expect(links(theirs, bot)).toEqual([youtube])
+    expect(links(ask(theirs), bot)).toEqual([youtube])
+  }
+  expect(links(copies[0]!, me)).toEqual([youtube])
+  const { text, entities } = said('look youtu.be/x')
+  const upload = { caption: text, caption_entities: entities, video: file('theirs') } as Message
+  expect(await requested(upload, bot, 'private', all)).toEqual(['https://youtu.be/x'])
+  expect(await requested(upload, bot, 'group', all)).toEqual(['https://youtu.be/x'])
+  expect(checked).toEqual([['https://youtu.be/x']])
 })
 
 // yt-dlp's last stderr line (and the link's extractors, which only matter
@@ -973,11 +1038,13 @@ test('send: a 429 waits retry_after and sends the video again, never as a docume
 test('send: a 429 that outlasts the retries fails without a document fallback', async () => {
   const fake = fakeApi(() => flood(0.01), floodWait(1))
   try {
+    const kept: string[] = []
     const sent = video((path) =>
-      sender(fake.api)({ chat: -100 }, 'video', () => new InputFile(path), { caption: 'x' }),
+      sender(fake.api, (f) => kept.push(f))({ chat: -100 }, 'video', () => new InputFile(path), { caption: 'x' }),
     )
     await expect(sent).rejects.toMatchObject({ error_code: 429 })
     expect(fake.methods()).toEqual(['sendVideo', 'sendVideo'])
+    expect(kept).toEqual([])
   } finally {
     fake.stop()
   }
@@ -1007,11 +1074,14 @@ test('send: a fresh file Telegram refuses as a video still goes as a document', 
       : sentAs('document'),
   )
   try {
+    // the file that went out is kept as the bot's own (own()), whatever it went as
+    const kept: string[] = []
     const [kind] = await video((path) =>
-      sender(fake.api)({ chat: -100 }, 'video', () => new InputFile(path), { caption: 'x' }),
+      sender(fake.api, (f) => kept.push(f))({ chat: -100 }, 'video', () => new InputFile(path), { caption: 'x' }),
     )
     expect(kind).toBe('document')
     expect(fake.methods()).toEqual(['sendVideo', 'sendDocument'])
+    expect(kept).toEqual(['u'])
   } finally {
     fake.stop()
   }
