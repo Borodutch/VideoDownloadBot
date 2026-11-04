@@ -20,6 +20,7 @@ type Call = {
   text?: string
   upload?: boolean
   inline?: string
+  query?: string
   file?: Uint8Array
   caption?: string
   title?: string
@@ -42,6 +43,7 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
   const calls: Call[] = []
   const updates: { update_id: number }[] = []
   let id = 0
+  const me = { id: 1, is_bot: true, first_name: 'Vid', username: 'VidBot' }
   const api = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -54,13 +56,14 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
           : {}
       const ok = (result: unknown) => Response.json({ ok: true, result })
       const chat = { id: Number(body.chat_id), type: 'private' }
-      if (method === 'getMe') return ok({ id: 1, is_bot: true, first_name: 'Vid', username: 'VidBot' })
+      if (method === 'getMe') return ok(me)
       if (method === 'getUpdates') {
         const next = updates.filter((u) => u.update_id >= (body.offset ?? 0))
         if (!next.length) await Bun.sleep(100)
         return ok(next)
       }
-      // inline = the guest reply an edit is to, file = the bytes uploaded
+      // inline = the guest reply an edit is to, query = the guest message an
+      // answer is to (text = the answer's), file = the bytes uploaded
       // (grammY sends a file as attach://<the field it's in>), title,
       // performer and duration as a video or audio file was sent with
       const media = [body.video, body.audio]
@@ -69,9 +72,10 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       const call = {
         method,
         chat: chat.id,
-        text: body.text,
+        text: body.text ?? body.result?.input_message_content?.message_text,
         upload: type.includes('multipart'),
         inline: body.inline_message_id,
+        query: body.guest_query_id,
         file: media && new Uint8Array(await media.arrayBuffer()),
         caption: body.caption,
         title: body.title,
@@ -148,6 +152,16 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       from: { id: user, is_bot: false, first_name: 'u', language_code: 'en' },
     }
   }
+  // the bot's own video of v, as it went out (the title linked to the link,
+  // then the mention)
+  const sent = (v: string) => ({
+    message_id: ++id,
+    date: 0,
+    video: { file_id: `f${id}`, file_unique_id: `f${id}`, width: 320, height: 240, duration: 1 },
+    caption: `${v}\n@${me.username}`,
+    caption_entities: [{ type: 'text_link', offset: 0, length: v.length, url: `https://www.youtube.com/watch?v=${v}` }],
+  })
+  const forwarded = { forward_origin: { type: 'user', date: 0, sender_user: me } }
   return {
     calls,
     // FAKE_MP4's bytes, which a download copies
@@ -156,11 +170,41 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     link(user: number, v: string) {
       updates.push({ update_id: updates.length + 1, message: message(user, v) } as { update_id: number })
     },
-    // as a guest message, the bot summoned in a chat it isn't in
-    guest(user: number, v: string) {
+    // the bot's own video of v forwarded by user 9 into chat: a group when
+    // it's negative, else that user's chat with the bot
+    forward(chat: number, v: string) {
+      const user = chat < 0 ? 9 : chat
       updates.push({
         update_id: updates.length + 1,
-        guest_message: { ...message(user, v), guest_query_id: 'q' },
+        message: {
+          ...sent(v),
+          chat: chat < 0 ? { id: chat, type: 'supergroup', title: 'g' } : { id: chat, type: 'private', first_name: 'u' },
+          from: { id: user, is_bot: false, first_name: 'u', language_code: 'en' },
+          ...forwarded,
+        },
+      } as { update_id: number })
+    },
+    // as a guest message (query q<user>), the bot summoned with the link in a
+    // chat it isn't in; or there, about its own video of v: 'forward' is
+    // that video forwarded, 'reply' a plain reply to it ("lol"), which
+    // Telegram calls the bot on as well, 'mention' the bot mentioned in
+    // reply to it
+    guest(user: number, v: string, about?: 'forward' | 'reply' | 'mention') {
+      const { text, entities, ...m } = message(user, v)
+      const reply = (said: string) => ({ text: said, entities: [], reply_to_message: { ...sent(v), chat: m.chat, from: me } })
+      updates.push({
+        update_id: updates.length + 1,
+        guest_message: {
+          ...m,
+          ...(about === 'forward'
+            ? { ...sent(v), ...forwarded }
+            : about === 'reply'
+              ? reply('lol')
+              : about === 'mention'
+                ? reply(`@${me.username}`)
+                : { text, entities }),
+          guest_query_id: `q${user}`,
+        },
       } as { update_id: number })
     },
     // the status texts the guest replies got
@@ -410,6 +454,54 @@ test.skipIf(skip)(
       [3, false],
     ])
     expect(bot.statuses(3).map((s) => s[0])).toEqual(['⏬', '⏫'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: its own video forwarded into a group it's in, or to itself, gets no answer",
+  async () => {
+    const bot = start()
+    let jobs: string[] = []
+    try {
+      bot.forward(-100, 'short1')
+      bot.forward(2, 'short2')
+      // a link sent after them: once its video is out, they've been handled
+      bot.link(3, 'short3')
+      await bot.until(() => bot.videos().some((v) => v.chat === 3))
+    } finally {
+      jobs = await bot.stop()
+    }
+    // no download, status or help text for the forwards (methods only: a
+    // failing toEqual on the calls would print an upload's every byte)
+    expect(bot.calls.filter((c) => c.chat === -100 || c.chat === 2).map((c) => [c.chat, c.method])).toEqual([])
+    expect(bot.videos().map((v) => v.chat)).toEqual([3])
+    expect(jobs.length).toBe(1)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a plain reply to its video or the video forwarded gets no answer, a mention in reply the help",
+  async () => {
+    const bot = start()
+    let jobs: string[] = []
+    try {
+      // (users other than 1, the bot's own id)
+      bot.guest(2, 'short2', 'reply')
+      bot.guest(3, 'short3', 'forward')
+      // once the mention's answer is out, the others have been handled
+      bot.guest(4, 'short4', 'mention')
+      await bot.until(() => bot.calls.some((c) => c.query === 'q4'))
+    } finally {
+      jobs = await bot.stop()
+    }
+    // no answer, edit or message for the first two (methods and texts only:
+    // a failing toEqual on the calls would print an upload's every byte)
+    const theirs = bot.calls.filter((c) => c.query || c.inline || [2, 3, 4].includes(c.chat))
+    expect(theirs.map((c) => [c.query, c.method, c.text])).toEqual([['q4', 'answerGuestQuery', t('en', 'help')]])
+    expect(bot.videos()).toHaveLength(0)
+    expect(jobs).toHaveLength(0)
   },
   30_000,
 )

@@ -101,16 +101,19 @@ test('lang: telegram codes map to the right locale', () => {
   expect(lang(undefined)).toBe('en')
 })
 
+// the bot, as getMe has it
+const me = { id: 7, username: 'vidbot' }
+
 test('links: replied-to links only when summoned', () => {
   const reply_to_message = {
     text: 'youtu.be/a here',
     entities: [{ type: 'url', offset: 0, length: 10 }],
   } as Message
   const ask = (text: string) => ({ text, reply_to_message }) as Message
-  expect(links(ask('@VidBot please'), 'vidbot')).toEqual(['https://youtu.be/a'])
-  expect(links(ask('nice video'), 'vidbot')).toEqual([])
-  expect(links(ask('@vidbotx'), 'vidbot')).toEqual([])
-  expect(links(ask('hey'), 'vidbot', true)).toEqual(['https://youtu.be/a'])
+  expect(links(ask('@VidBot please'), me)).toEqual(['https://youtu.be/a'])
+  expect(links(ask('nice video'), me)).toEqual([])
+  expect(links(ask('@vidbotx'), me)).toEqual([])
+  expect(links(ask('hey'), me, true)).toEqual(['https://youtu.be/a'])
 })
 
 const said = (text: string) => {
@@ -128,15 +131,61 @@ test('requested: unless summoned, groups only check links with yt-dlp', async ()
   const checked: string[][] = []
   const video = async (u: string[]) => (checked.push(u), u.slice(1))
   const msg = said('tugport.com and youtu.be/x')
-  expect(await requested(msg, 'vidbot', 'group', video)).toEqual(['https://youtu.be/x'])
+  expect(await requested(msg, me, 'group', video)).toEqual(['https://youtu.be/x'])
   expect(checked).toEqual([['https://tugport.com/', 'https://youtu.be/x']])
   for (const [m, chat] of [
     [msg, 'private'],
     [said('tugport.com @VidBot'), 'supergroup'],
     [said('no links here'), 'group'],
   ] as const)
-    expect(await requested(m, 'vidbot', chat, video)).toEqual(links(m, 'vidbot'))
+    expect(await requested(m, me, chat, video)).toEqual(links(m, me))
   expect(checked.length).toBe(1)
+})
+
+test("links: the bot's own messages ask for nothing, forwarded or replied to", async () => {
+  // one of its videos as it went out: the title linked to the source, then
+  // the mention (options() in main)
+  const title = 'Never Gonna Give You Up'
+  const video = (m: object) =>
+    ({
+      caption: `${title}\n@VidBot`,
+      caption_entities: [{ type: 'text_link', offset: 0, length: title.length, url: youtube }],
+      video: { file_id: 'v', file_unique_id: 'u', width: 320, height: 240, duration: 1 },
+      ...m,
+    }) as Message
+  const bot = { ...me, is_bot: true, first_name: 'Vid' }
+  const other = { id: 8, is_bot: true, first_name: 'Other', username: 'otherbot' }
+  const user = { id: 5, is_bot: false, first_name: 'u' }
+  const from = (sender_user: object) => ({ forward_origin: { type: 'user', date: 0, sender_user } })
+  const forwarded = video(from(bot))
+  const through = video({ via_bot: bot })
+  // a group has its links checked with yt-dlp unless the bot is summoned:
+  // its own caption's mention mustn't get them past that either
+  const checked: string[][] = []
+  const all = async (u: string[]) => (checked.push(u), u)
+  for (const m of [forwarded, through]) {
+    expect(links(m, me)).toEqual([])
+    expect(links(m, me, true)).toEqual([])
+    for (const chat of ['private', 'group', 'supergroup'])
+      expect(await requested(m, me, chat, all)).toEqual([])
+  }
+  expect(checked).toEqual([])
+  // mentioning it in reply to its video, sent or forwarded, doesn't ask for
+  // the video again; a link in the reply itself still counts
+  const ask = (reply_to_message: Message, text = '@VidBot thanks') =>
+    ({ ...said(text), reply_to_message }) as Message
+  for (const r of [video({ from: bot }), forwarded, through]) {
+    expect(links(ask(r), me)).toEqual([])
+    expect(links(ask(r), me, true)).toEqual([])
+    expect(links(ask(r, '@VidBot youtu.be/a'), me)).toEqual(['https://youtu.be/a'])
+  }
+  // the same video forwarded from anyone else, or sent through another bot,
+  // is a link like any other, replied to as well
+  for (const m of [video(from(user)), video(from(other)), video({ via_bot: other })]) {
+    expect(links(m, me)).toEqual([youtube])
+    expect(links(ask(m), me)).toEqual([youtube])
+  }
+  expect(links(ask(video({ from: user })), me)).toEqual([youtube])
 })
 
 // yt-dlp's last stderr line (and the link's extractors, which only matter
@@ -270,7 +319,7 @@ test('i18n: every language has every key', () => {
 test.skipIf(!Bun.which('yt-dlp') && !process.env.CI)(
   'requested: plain sites stay quiet in groups, video sites and summons do not',
   async () => {
-    const group = (text: string) => requested(said(text), 'vidbot', 'group')
+    const group = (text: string) => requested(said(text), me, 'group')
     expect(await group('tugport.com запущу скоро')).toEqual([])
     expect(await group(`read ${article}`)).toEqual([])
     expect(await group(`${youtube} lol ${tiktok} tugport.com`)).toEqual([youtube, tiktok])
@@ -288,7 +337,7 @@ test.skipIf(!Bun.which('yt-dlp') && !process.env.CI)(
     expect(await videos([tiktok, 'https://tugport.com/', spotify, youtube])).toEqual([tiktok, youtube])
     expect(await group('@VidBot tugport.com')).toEqual(['https://tugport.com/'])
     expect(
-      await requested(said(`tugport.com ${article}`), 'vidbot', 'private'),
+      await requested(said(`tugport.com ${article}`), me, 'private'),
     ).toEqual(['https://tugport.com/', article])
   },
   30_000,

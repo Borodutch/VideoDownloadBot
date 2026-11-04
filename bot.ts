@@ -194,10 +194,22 @@ export function urls(msg: Message) {
 export const summoned = (msg: Message, username: string, guest = false) =>
   guest || new RegExp(`@${username}\\b`, 'i').test(msg.text ?? msg.caption ?? '')
 
-// Also the links in the message replied to when the bot is summoned
-export function links(msg: Message, username: string, guest = false) {
-  const reply = summoned(msg, username, guest) ? msg.reply_to_message : undefined
-  return [...new Set([...urls(msg), ...(reply ? urls(reply) : [])])]
+type Me = { id: number; username: string }
+
+// A forward of the bot's own message, or one sent through it (inline). Its
+// videos' captions have the link and the @mention that ask it for the video,
+// so its video forwarded into another chat it's in would go out there twice.
+export const own = (msg: Message, me: number) =>
+  msg.via_bot?.id === me ||
+  (msg.forward_origin?.type === 'user' && msg.forward_origin.sender_user.id === me)
+
+// Also the links in the message replied to when the bot is summoned. The
+// bot's own messages ask for nothing, as the message or the one replied to.
+export function links(msg: Message, me: Me, guest = false) {
+  if (own(msg, me.id)) return []
+  const reply = summoned(msg, me.username, guest) ? msg.reply_to_message : undefined
+  const theirs = reply && reply.from?.id !== me.id && !own(reply, me.id) ? urls(reply) : []
+  return [...new Set([...urls(msg), ...theirs])]
 }
 
 // Extractors that claim links without being a site's video extractor: the
@@ -229,12 +241,12 @@ export async function videos(urls: string[]) {
 // only links to a site yt-dlp knows count.
 export async function requested(
   msg: Message,
-  username: string,
+  me: Me,
   chat: string,
   video = videos,
 ) {
-  const found = links(msg, username)
-  return chat === 'private' || summoned(msg, username) || !found.length
+  const found = links(msg, me)
+  return chat === 'private' || summoned(msg, me.username) || !found.length
     ? found
     : video(found)
 }
@@ -1524,7 +1536,12 @@ function main() {
   async function guest(ctx: Context) {
     const msg = ctx.guestMessage!
     const lang = ctx.from?.language_code
-    const url = links(msg, ctx.me.username, true)[0]
+    const url = links(msg, ctx.me, true)[0]
+    // Telegram calls it on a plain reply to one of its messages too, so one
+    // that asks for nothing ("thanks" under its video) gets the help only if
+    // it mentions the bot; its own message forwarded here, mention and all,
+    // gets nothing either
+    if (!url && (own(msg, ctx.me.id) || !summoned(msg, ctx.me.username))) return
     const { inline_message_id: id } = await ctx.answerGuestQuery({
       type: 'article',
       id: 'status',
@@ -1578,10 +1595,12 @@ function main() {
     help(ctx)
   })
   bot.on('message', (ctx) => {
-    const found = links(ctx.msg, ctx.me.username)
+    // its own videos forwarded to it get no answer, not even the help
+    if (own(ctx.msg, ctx.me.id)) return
+    const found = links(ctx.msg, ctx.me)
     // handlers run detached so one long download doesn't block the next update
     void track(
-      requested(ctx.msg, ctx.me.username, ctx.chat.type)
+      requested(ctx.msg, ctx.me, ctx.chat.type)
         .then((wanted) => wanted.forEach((url) => void track(handle(ctx, url))))
         .catch(console.error),
     )
