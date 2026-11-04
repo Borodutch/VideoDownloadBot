@@ -1280,7 +1280,10 @@ test('shown: sample aspect ratio and rotation', () => {
   expect(shown({ width: 0, height: 0 })).toBeUndefined()
 })
 
-// What sendVideo and the thumbnail get from a real anamorphic, rotated file
+// What sendVideo and the thumbnail get from a real anamorphic, rotated file.
+// This test makes nine ffmpeg and ffprobe runs, most one after another: they
+// take 0.3 s alone but have run past Bun's default 5 s beside the whole suite
+// on a busy runner
 test.skipIf(!(Bun.which('ffmpeg') || process.env.CI))('probe and thumbnail: display size of the file', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
@@ -1320,7 +1323,7 @@ test.skipIf(!(Bun.which('ffmpeg') || process.env.CI))('probe and thumbnail: disp
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
-})
+}, 30_000)
 
 test('unsend: a delete outlasts a long flood wait and server errors, gives up on other errors', async () => {
   const waits: number[] = []
