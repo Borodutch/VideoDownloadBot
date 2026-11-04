@@ -658,6 +658,53 @@ test.skipIf(skip)(
 )
 
 test.skipIf(skip)(
+  "bot: a sent table that fails every write and read lets a copy of its video through as a request, and serves links and users' own uploads as usual",
+  async () => {
+    // sent as a view without a file column: the bot's CREATE TABLE IF NOT
+    // EXISTS leaves it, and every write to it (keep, as a file goes out) and
+    // read of it (mine, whether a message's file is the bot's) fails. A
+    // failed write costs the chat nothing, and a failed read only makes the
+    // file anyone's.
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE VIEW sent AS SELECT 1 AS other')
+    db.close()
+    const bot = start({ DATA_DIR: data })
+    // a request is over once its status is gone, or says it failed
+    const over = (chat: number) =>
+      bot.calls.some((c) => c.chat === chat && c.method === 'deleteMessage') ||
+      bot.statuses(chat).includes(t('en', 'failed'))
+    let jobs: string[] = []
+    try {
+      bot.link(2, 'short1')
+      // its video is cached by then
+      await bot.until(() => over(2))
+      // a copy of that video, then user 5's own upload with a link
+      bot.copy(4, 'short1', bot.videos()[0]!.unique!)
+      bot.copy(5, 'short5', 'theirs')
+      await bot.until(() => bot.videos().length === 3 && over(5))
+    } finally {
+      jobs = await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // the copy got short1 from the cache, the others were downloaded
+    // (chats and flags only: a failing toEqual on the calls would print an
+    // upload's every byte)
+    expect(bot.videos().map((v) => [v.chat, v.upload]).sort()).toEqual([
+      [2, true],
+      [4, false],
+      [5, true],
+    ])
+    // and none heard it failed
+    expect(bot.statuses(2).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(bot.statuses(4)).toEqual([])
+    expect(bot.statuses(5).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok', 'ok'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
   "bot: a deploy's handover holding the database's write lock holds up its start rather than ending it",
   async () => {
     // the old container, still polling, has the write lock as the new one
@@ -683,6 +730,68 @@ test.skipIf(skip)(
       rmSync(data, { recursive: true, force: true })
     }
     expect(jobs.length).toBe(1)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: once it's up, another process holding the database's write lock holds up none of its answers",
+  async () => {
+    // Past the tables set up at start, a statement that meets the lock fails
+    // at once rather than wait for it: bun:sqlite is synchronous, so a wait
+    // would hold the whole bot still, 10 s for each update's census write
+    // alone. The links' downloads wait for the test, so the jobs' own writes
+    // (the cache) come once the lock is let go.
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = new Database(join(data, 'bot.sqlite'))
+    const bot = start({ DATA_DIR: data })
+    // the chat shows the bot at work on its link (download())
+    const busy = (chat: number) => bot.calls.some((c) => c.chat === chat && c.method === 'sendChatAction')
+    let jobs: string[] = []
+    let chats: number[] = []
+    let took = 0
+    try {
+      // up, past those tables, and done writing: its first link's video is
+      // out and cached
+      bot.link(1, 'short1')
+      await bot.until(() => bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage'))
+      db.run('BEGIN IMMEDIATE')
+      const at = Date.now()
+      bot.link(2, 'dhold2')
+      bot.link(3, 'dhold3')
+      // both are taken up before a single wait would be over: the wait is
+      // main()'s busy_timeout for the tables at start (10000 ms; the bound
+      // needs it to stay over 5 s), so the two would hold the bot 20 s.
+      // Timed on the clock: a busy runner slows the test's polling too.
+      await bot.until(() => busy(2) && busy(3))
+      took = Date.now() - at
+      // and their downloads begin with the lock still held
+      await bot.until(() => bot.held('dhold2', 'dl') && bot.held('dhold3', 'dl'))
+      // their census writes met the lock: dropped, as a failed stats write
+      // is (only logged)
+      chats = db.query<{ id: number }, []>('SELECT id FROM chats').all().map((r) => r.id)
+      db.run('ROLLBACK')
+      for (const v of ['dhold2', 'dhold3']) bot.release(v, 'dl')
+      await bot.until(() => bot.videos().length === 3)
+    } finally {
+      if (db.inTransaction) db.run('ROLLBACK')
+      db.close()
+      for (const v of ['dhold2', 'dhold3']) bot.release(v, 'dl')
+      jobs = await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    expect(took).toBeLessThan(10_000)
+    expect(chats).toEqual([1])
+    // and both went out as usual, neither hearing it failed (chats and
+    // flags only: a failing toEqual on the calls would print an upload's
+    // every byte)
+    expect(bot.videos().map((v) => [v.chat, v.upload]).sort()).toEqual([
+      [1, true],
+      [2, true],
+      [3, true],
+    ])
+    for (const chat of [2, 3]) expect(bot.statuses(chat).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok', 'ok', 'ok'])
   },
   30_000,
 )
