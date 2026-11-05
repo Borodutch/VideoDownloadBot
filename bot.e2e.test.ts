@@ -64,7 +64,16 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
   if (!clock) throw new Error('start() is for e2e() tests')
   const end = clock.begun + clock.timeout - STOP_MS
   const me = { id: 1, is_bot: true, first_name: 'Vid', username: 'VidBot' }
+  // On 127.0.0.1, where the bot calls it. A listener on every address can be
+  // handed a port that a 127.0.0.1 listener, any process's, already has
+  // (macOS hands ports out from one counter, and a port an IPv4 listener
+  // holds isn't kept from an IPv6 listener), and then 127.0.0.1 reaches that
+  // one: a JSON answer from it without ok, as the OpenClaw gateway's 404,
+  // crashes the bot at its getMe, and one that isn't JSON, as an egress
+  // proxy's empty 400, has grammY retry getMe silently (#459). No other
+  // 127.0.0.1 listener is given this one's port.
   const api = Bun.serve({
+    hostname: '127.0.0.1',
     port: 0,
     async fetch(req) {
       const method = new URL(req.url).pathname.split('/').pop()!
@@ -350,8 +359,9 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     // however long the waits before it took: so one that runs out fails
     // before its test times out, which would lose this report. It fails with
     // where it was (its lines in this file, the test's last), what it waited
-    // for, the bot's last stderr and stdout lines and its last Bot API calls
-    // (getMe and getUpdates aside)
+    // for, the bot's last stderr and stdout lines, its last Bot API calls
+    // (getMe and getUpdates aside) and the fake Bot API's port, for lsof when
+    // the calls went elsewhere (#459)
     async until(done: () => boolean, ms = 15_000) {
       // the callers' frames, taken before an await drops them
       const at = (new Error().stack ?? '')
@@ -381,6 +391,7 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
           throw new Error(
             [
               `until() at bot.e2e.test.ts:${at.join(' < ') || '?'} not done after ${(waited / 1000).toFixed(1)} s${late}${cut}: ${done}`,
+              `fake Bot API at 127.0.0.1:${api.port}`,
               tail('bot stderr lines', errors),
               tail('bot stdout lines', lines),
               tail('Bot API calls', made),
@@ -2910,7 +2921,9 @@ e2e(
     const [a, b, c] = Array.from({ length: 50 }, (_, i) => 10 + i).filter((u) => arm(campaign, u)) as [number, number, number]
     let fetched = false
     const events: { c: string; v: string; k: string }[] = []
+    // on 127.0.0.1, where the bot calls it, as start()'s fake Bot API
     const lumen = Bun.serve({
+      hostname: '127.0.0.1',
       port: 0,
       async fetch(req) {
         const path = new URL(req.url).pathname

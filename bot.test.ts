@@ -1042,10 +1042,14 @@ const sentAs = (kind: 'video' | 'document') => ({
   },
 })
 
-// A fake Bot API server: answer(method, n) is its n-th answer to method
+// A fake Bot API server: answer(method, n) is its n-th answer to method. On
+// 127.0.0.1 and called there, as bot.e2e.test.ts's fakes are: a listener on
+// every address can share its port with another process's loopback one,
+// which then takes the calls (#459)
 function fakeApi(answer: (method: string, n: number) => object, wait: Transformer = floodWait()) {
   const calls: { method: string; at: number }[] = []
   const server = Bun.serve({
+    hostname: '127.0.0.1',
     port: 0,
     async fetch(req) {
       await req.arrayBuffer()
@@ -1054,7 +1058,7 @@ function fakeApi(answer: (method: string, n: number) => object, wait: Transforme
       return Response.json(answer(method, calls.filter((c) => c.method === method).length))
     },
   })
-  const api = new Api('1:test', { apiRoot: `http://localhost:${server.port}` })
+  const api = new Api('1:test', { apiRoot: `http://127.0.0.1:${server.port}` })
   api.config.use(wait)
   return { api, calls, methods: () => calls.map((c) => c.method), stop: () => server.stop(true) }
 }

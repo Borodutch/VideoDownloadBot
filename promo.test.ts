@@ -96,7 +96,10 @@ test('decide: out of every experiment when switched off or not covered', () => {
 
 test('promos: one promo per cap even for several links, seen once a day, events reach the server', async () => {
   const got: any[] = []
+  // on 127.0.0.1 and called there, as every fake in this file, so that no
+  // other process's listener can take its calls (#459)
   const server = Bun.serve({
+    hostname: '127.0.0.1',
     port: 0,
     async fetch(req) {
       const path = new URL(req.url).pathname
@@ -111,7 +114,7 @@ test('promos: one promo per cap even for several links, seen once a day, events 
   try {
     const p = promos(new Database(':memory:'), {
       PROMO_TOKEN: 'tok',
-      PROMO_URL: `http://localhost:${server.port}/go/campaigns.json`,
+      PROMO_URL: `http://127.0.0.1:${server.port}/go/campaigns.json`,
     })
     expect(p.decide(inArm('a'), 'private', 'en')).toBeNull() // not fetched yet
     await p.refresh()
@@ -141,6 +144,7 @@ test('promos: one promo per cap even for several links, seen once a day, events 
 test('arrivals: /start from another bot\'s campaign reports start, new and use once a day for 7 days', async () => {
   const got: any[] = []
   const server = Bun.serve({
+    hostname: '127.0.0.1',
     port: 0,
     async fetch(req) {
       if (new URL(req.url).pathname === '/go/events') got.push(...(await req.json()).events)
@@ -149,7 +153,7 @@ test('arrivals: /start from another bot\'s campaign reports start, new and use o
   })
   try {
     const db = new Database(':memory:')
-    const p = promos(db, { PROMO_TOKEN: 'tok', PROMO_URL: `http://localhost:${server.port}/go/campaigns.json` })
+    const p = promos(db, { PROMO_TOKEN: 'tok', PROMO_URL: `http://127.0.0.1:${server.port}/go/campaigns.json` })
     p.arrived(42, 'bc1-a-voicy', () => true)
     p.arrived(42, 'bc1-a-voicy', () => false) // an existing chat sends it again: start only
     p.arrived(42, 'hello', () => true) // not a campaign
@@ -172,6 +176,7 @@ test('arrivals: /start from another bot\'s campaign reports start, new and use o
 test("locks: another process's lock on the database costs a reply its promo, never a throw, and the stats go all the same", async () => {
   const got: any[] = []
   const server = Bun.serve({
+    hostname: '127.0.0.1',
     port: 0,
     async fetch(req) {
       const path = new URL(req.url).pathname
@@ -185,7 +190,7 @@ test("locks: another process's lock on the database costs a reply its promo, nev
   const other = new Database(file)
   try {
     const db = new Database(file)
-    const p = promos(db, { PROMO_TOKEN: 'tok', PROMO_URL: `http://localhost:${server.port}/go/campaigns.json` })
+    const p = promos(db, { PROMO_TOKEN: 'tok', PROMO_URL: `http://127.0.0.1:${server.port}/go/campaigns.json` })
     await p.refresh()
     // bot.ts's fresh(): whether the census has the chat (a read)
     const fresh = () => !!db.query('SELECT 1 FROM arrival LIMIT 1').get()
@@ -239,9 +244,9 @@ test("locks: another process's lock on the database costs a reply its promo, nev
 })
 
 test('promos: a campaigns.json decide() can\'t read means no promo, never a throw', async () => {
-  const server = Bun.serve({ port: 0, fetch: () => Response.json({ ...cfg(), campaigns: {} }) })
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ ...cfg(), campaigns: {} }) })
   try {
-    const p = promos(new Database(':memory:'), { PROMO_TOKEN: 'tok', PROMO_URL: `http://localhost:${server.port}/go/campaigns.json` })
+    const p = promos(new Database(':memory:'), { PROMO_TOKEN: 'tok', PROMO_URL: `http://127.0.0.1:${server.port}/go/campaigns.json` })
     await p.refresh()
     expect(p.decide(inArm('a'), 'private', 'en')).toBeNull()
   } finally {
