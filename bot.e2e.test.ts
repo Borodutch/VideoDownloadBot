@@ -1268,6 +1268,66 @@ test.skipIf(skip)(
   30_000,
 )
 
+test.skipIf(skip)(
+  'bot: a cached link whose file_id is dead is downloaded again, and the dead file_id is forgotten under every key',
+  async () => {
+    // short3's copy is gone from Telegram's servers (the fake Bot API answers
+    // its file_id with a 400). It's cached as the bot caches a video: under
+    // the link it was asked for and its id, and under another link to it that
+    // went out from there. That link's row has another url, as a refresh's
+    // swap leaves it: forget goes by the file_id alone. Its one try forgets
+    // every row with it (forget): the job doesn't try it again under the id,
+    // and the other link loses its row.
+    // A copy of it that isn't dead, uploaded on its own, stays under a link
+    // nobody sends: forget takes the dead file_id's rows alone. The download
+    // caches the new copy under the link and the id (put), so their rows
+    // alone can't show the forget.
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    for (const key of [link('short3'), 'Youtube:short3'])
+      db.run("INSERT INTO files VALUES (?, 'video', 'dead3', 'Video', ?)", [key, link('short3')])
+    db.run("INSERT INTO files VALUES (?, 'video', 'dead3', 'Video', 'https://youtu.be/short3')", [link('short3&t=1')])
+    db.run("INSERT INTO files VALUES (?, 'video', 'cached3', 'Video', ?)", [link('short3&t=2'), link('short3')])
+    db.close()
+    const bot = start({ DATA_DIR: data })
+    // a request is over once its status is gone, or says it failed
+    const over = (chat: number) =>
+      bot.calls.some((c) => c.chat === chat && c.method === 'deleteMessage') ||
+      bot.statuses(chat).includes(t('en', 'failed'))
+    let jobs: string[] = []
+    let cached: Record<string, string> = {}
+    try {
+      bot.link(3, 'short3')
+      await bot.until(() => over(3))
+    } finally {
+      jobs = await bot.stop()
+      const db = new Database(join(data, 'bot.sqlite'))
+      const rows = db.query<{ key: string; file_id: string }, []>('SELECT key, file_id FROM files').all()
+      cached = Object.fromEntries(rows.map((r) => [r.key, r.file_id]))
+      db.close()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // the dead file_id's one try, then the download's upload, and no failure
+    // heard (chats and flags only: a failing toEqual on the calls would print
+    // an upload's every byte)
+    expect(bot.videos().map((v) => [v.chat, v.upload])).toEqual([
+      [3, false],
+      [3, true],
+    ])
+    expect(bot.statuses(3).map((s) => [...s][0])).toEqual(['⏬', '⏫'])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok'])
+    // the new copy under the link and the id, the other link's row gone and
+    // the live copy's left
+    expect(cached['Youtube:short3']).toMatch(/^v\d+$/)
+    expect(cached[link('short3')]).toBe(cached['Youtube:short3'])
+    expect(cached[link('short3&t=1')]).toBeUndefined()
+    expect(cached[link('short3&t=2')]).toBe('cached3')
+  },
+  30_000,
+)
+
 // The cache's statements meet another process's lock on bot.sqlite (a
 // deploy's old container finishing its jobs) and fail at once: past the
 // start busy_timeout is 0. The tests below hold the lock from the test
@@ -1276,10 +1336,13 @@ test.skipIf(skip)(
 // (its start would wait for it, then stop). Each keeps it while the bot's
 // drain lets the handlers finish. locked() opens the database with seed in
 // the cache, each row a key, its file_id and the video's link; its own lock
-// waits for the bot's writes.
+// waits for the bot's writes. It creates both tables the tests read once the
+// bot is gone (files, sized): a bot that never came up then fails its test
+// with what went wrong, where a read of sized would throw in the cleanup.
 function locked(data: string, seed: [key: string, file: string, url: string][] = []) {
   const db = new Database(join(data, 'bot.sqlite'))
   db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+  db.run('CREATE TABLE sized (file_id TEXT PRIMARY KEY)')
   for (const row of seed) db.run("INSERT INTO files VALUES (?1, 'video', ?2, 'Video', ?3)", row)
   db.run('PRAGMA busy_timeout = 10000')
   return db
@@ -2007,7 +2070,12 @@ test.skipIf(skip)(
     // old2's page shows new2 at the first read already. old1's refresh waits
     // for a slot behind the same user's long1 (3 s), so its -J info is stale
     // by the download, which fails 3 MB in, and the page read again picks
-    // new1. old3's page still shows old3.
+    // new1. old3's page still shows old3. old3's copy is cached under two
+    // other links to it too, which nobody sends: the new copy gets there only
+    // by the swap, as the job caches it under the link it was asked for and
+    // the id (put). Those two rows have another url: a row keeps the url its
+    // copy went out with, and old3's went out when its link read differently,
+    // so the swap can't go by the new copy's url.
     const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
     const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
     const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
@@ -2016,6 +2084,8 @@ test.skipIf(skip)(
     for (const [n, v] of [[1, 'old1&cut&next=new1'], [2, 'old2&next=new2'], [3, 'old3']] as const)
       for (const key of [link(v), `Youtube:old${n}`])
         db.run("INSERT INTO files VALUES (?, 'video', ?, 'Video', ?)", [key, `unsized${n}`, link(v)])
+    for (const key of [link('old3&t=1'), link('old3&t=2')])
+      db.run("INSERT INTO files VALUES (?, 'video', 'unsized3', 'Video', 'https://youtu.be/old3')", [key])
     db.close()
     writeFileSync(join(pages, 'old2'), 'read\n')
     const bot = start({ MINUTE_MS: '250', PAGES: pages, DATA_DIR: data })
@@ -2062,6 +2132,7 @@ test.skipIf(skip)(
     expect([cached[link('old1&cut&next=new1')], cached[link('old2&next=new2')]]).toEqual(['unsized1', 'unsized2'])
     expect(cached['Youtube:old3']).toMatch(/^v\d+$/)
     expect(cached[link('old3')]).toBe(cached['Youtube:old3'])
+    for (const key of [link('old3&t=1'), link('old3&t=2')]) expect(cached[key]).toBe(cached['Youtube:old3'])
     expect(jobs).toHaveLength(5)
     expect(jobs.filter((l) => /^job fail:quiet host=www\.youtube\.com .*lane=short .* reread=1 dropped=3 other=1 dl=\d+\.\d mb=0 total=/.test(l))).toHaveLength(1)
     expect(jobs.filter((l) => /^job fail:quiet host=www\.youtube\.com metaq=\S+ meta=\S+ total=/.test(l))).toHaveLength(1)
