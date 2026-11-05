@@ -43,8 +43,9 @@
 // (as ffmpeg would), in a session of its own when "escape" is in it too, has
 // 2 MB, then after 0.5 s 2001 MB (a sparse file), and is done with that file
 // when the child is; with $LINGER set it also leaves a
-// process in its group that ignores SIGTERM, doesn't hold its output and
-// writes "up", then "done" 7 s later, to $LINGER/<id>.<its pid>; one with
+// process in its group that ignores SIGTERM, doesn't hold its output, writes
+// "up" to $LINGER/<id>.<its pid> and lives until the test is over (its $GATES
+// dir is gone), a minute at most: only a SIGKILL stops it sooner; one with
 // "parts" in it has a merge on disk for 1 s, 1900 and 100 MB parts and their
 // 2000 MB merged copy, v.temp.mp4 at first and v.mp4 from 0.5 s on, as a
 // merge renames it before the parts go)
@@ -234,7 +235,7 @@ if (args.includes('-J')) {
     // before the file is too big: a stop would miss a child forked as it comes
     const child = Bun.spawn(['sleep', String(20 * SCALE)], { stdout: 'inherit', stderr: 'inherit', detached: url.includes('escape') })
     if (process.env.LINGER)
-      Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; sleep ${7 * SCALE}; echo done >> "$log"`], {
+      Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; i=0; while [ -d "$GATES" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done`], {
         env: { ...process.env, V: new URL(url).searchParams.get('v')! },
         stdio: ['ignore', 'ignore', 'ignore'],
       }).unref()

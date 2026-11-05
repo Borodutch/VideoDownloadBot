@@ -458,16 +458,21 @@ test.skipIf(skip)(
     // four slots, three for long videos
     const bot = start({ MAX_DOWNLOADS: '4' })
     let jobs: string[] = []
-    const downloading = (chat: number) => bot.statuses(chat).filter((s) => s.startsWith('⏬')).length
+    const long = ['dholdlong1', 'dholdlong2', 'dholdlong3']
     try {
-      // two users' long links take the three long slots (one user's take two at most)...
-      bot.link(1, 'long1')
-      bot.link(1, 'long2')
-      bot.link(2, 'long3')
-      await bot.until(() => downloading(1) === 2 && downloading(2) === 1)
-      // ...a reel takes the fourth at once, and a stream of unknown length waits for a long one
+      // two users' long links take the three long slots (one user's take two
+      // at most) and download until the test lets them go...
+      bot.link(1, 'dholdlong1')
+      bot.link(1, 'dholdlong2')
+      bot.link(2, 'dholdlong3')
+      await bot.until(() => long.every((v) => bot.held(v, 'dl')))
+      // ...a reel takes the fourth at once and goes out, and a stream of
+      // unknown length waits for a long one, 2 s at least
       bot.link(3, 'reel1')
       bot.link(4, 'stream1')
+      await bot.until(() => bot.videos().length === 1 && bot.statuses(4).some((s) => s.startsWith('⏳')))
+      await Bun.sleep(2000)
+      for (const v of long) bot.release(v, 'dl')
       await bot.until(() => bot.videos().length === 5)
     } finally {
       jobs = await bot.stop()
@@ -1577,12 +1582,13 @@ test.skipIf(skip)(
   'bot: a download stops once one of its files passes 2000 MB, as too large, without reading the page again',
   async () => {
     // half time: a minute is 125 ms, the files are weighed every 10 ms, and a
-    // long video's job has 5.6 s. long1 holds the long slot for 1.5 s, by
-    // when endlessstream2's saved info is stale, so a failed download of it
-    // would read the page again. Its file passes 2000 MB 0.25 s in, and its
-    // yt-dlp would go on for 10 s. It leaves a process in its group that
-    // ignores the stop's SIGTERM, doesn't hold its output and would live
-    // 3.5 s: it gets the SIGKILL as the run ends. parts3 has a merge on disk,
+    // long video's job has 5.6 s. dholdlong1 holds the long slot until two
+    // minutes after endlessstream2 is in line for it, by when
+    // endlessstream2's saved info is stale, so a failed download of it would
+    // read the page again. Its file passes 2000 MB 0.25 s in, and its yt-dlp
+    // would go on for 10 s. It leaves a process in its group that ignores the
+    // stop's SIGTERM, doesn't hold its output and lives until the test is
+    // over: it gets the SIGKILL as the run ends. parts3 has a merge on disk,
     // each file 2000 MB at most and 4000 MB together, and goes out.
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
     const log = () => readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8'))
@@ -1591,13 +1597,16 @@ test.skipIf(skip)(
     let lingered: string[] = []
     let gone = false
     try {
-      bot.link(1, 'long1')
-      await bot.until(() => bot.statuses(1).length > 0)
+      bot.link(1, 'dholdlong1')
+      await bot.until(() => bot.held('dholdlong1', 'dl'))
       bot.link(2, 'endlessstream2')
       bot.link(3, 'parts3')
+      await bot.until(() => bot.statuses(2).some((s) => s.startsWith('⏳')))
+      await Bun.sleep(250)
+      bot.release('dholdlong1', 'dl')
       await bot.until(() => bot.videos().length === 2 && bot.statuses(2).some((s) => s.startsWith('😱')))
       // the lingering process (its log is named <link>.<its pid>) is gone
-      // within a second of the run's end, short of its "done"
+      // within a second of the run's end
       const pid = Number(readdirSync(dir)[0]!.split('.').pop())
       for (let i = 0; i < 20 && alive(pid); i++) await Bun.sleep(50)
       gone = !alive(pid)
@@ -1630,9 +1639,13 @@ test.skipIf(skip)(
     // yt-dlp's stdout and stderr open for 10 s; the second one's child
     // ignores SIGTERM: its job ends 2.5 s later all the same, and the child
     // must take the SIGKILL then, rather than go on to its 10 s. The two hold
-    // both slots, so a third link waits for the first one's
+    // both slots, so another link of the first one's user waits for theirs
+    // (one user's jobs get one of two slots). The first one's "Downloading…"
+    // takes until that link is in line, and its download, with its time
+    // limit, begins only after it
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-stubborn-'))
-    const bot = start({ ...HALF, LINGER: dir })
+    const go = gate()
+    const bot = start({ ...HALF, LINGER: dir }, (c) => (c.chat === 1 && c.text?.startsWith('⏬') ? go : 0))
     let jobs: string[] = []
     let stubborn = 0
     let survived = true
@@ -1640,7 +1653,9 @@ test.skipIf(skip)(
       bot.link(1, 'ffmpeg1')
       bot.link(2, 'stubbornffmpeg1')
       await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('⏬'))))
-      bot.link(3, 'next1')
+      bot.link(1, 'next1')
+      await bot.until(() => bot.statuses(1).some((s) => s.startsWith('⏳')))
+      go.open()
       await bot.until(
         () => bot.videos().length === 1 && [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))),
         25_000,
@@ -1655,8 +1670,14 @@ test.skipIf(skip)(
     }
     expect(stubborn).toBeGreaterThan(0)
     expect(survived).toBe(false)
-    expect(bot.videos().map((v) => v.chat)).toEqual([3])
-    for (const chat of [1, 2]) expect(bot.statuses(chat).map((s) => [...s][0])).toEqual(['⏬', '😱'])
+    expect(bot.videos().map((v) => v.chat)).toEqual([1])
+    expect(bot.statuses(2).map((s) => [...s][0])).toEqual(['⏬', '😱'])
+    // the first one's status and then the next one's (queued) in its chat;
+    // the first one fails as the next one, which then has its slot, downloads
+    const one = bot.statuses(1).map((s) => [...s][0])
+    expect(one.slice(0, 2)).toEqual(['⏬', '⏳'])
+    expect(one.slice(2, 4).sort()).toEqual(['⏬', '😱'].sort())
+    expect(one.slice(4)).toEqual(['⏫'])
     expect(jobs).toHaveLength(3)
     const timeouts = jobs.filter((l) => l.startsWith('job timeout '))
     expect(timeouts).toHaveLength(2)
@@ -1669,13 +1690,15 @@ test.skipIf(skip)(
     expect(term).toBeLessThan(5.5)
     expect(kill).toBeGreaterThanOrEqual(6.25)
     expect(kill).toBeLessThan(9)
-    // the third got the first one's slot when that one hit its time limit,
-    // 3.75 s after it began downloading, less the moment the third link came in
+    // the next one got its user's slot when the first one hit its time
+    // limit: it was in line before that one began downloading, waited for
+    // all of its download, and then only for the bot's own few steps (not a
+    // grace's 2.5 s more)
     const next = jobs.find((l) => l.startsWith('job ok '))!
-    expect(next).toMatch(/^job ok host=www\.youtube\.com .*lane=short ahead=0 /)
+    expect(next).toMatch(/^job ok host=www\.youtube\.com .*lane=short ahead=0 own=1 /)
     const wait = Number(/ wait=([\d.]+)/.exec(next)![1])
-    expect(wait).toBeGreaterThan(1)
-    expect(wait).toBeLessThan(5.5)
+    expect(wait).toBeGreaterThanOrEqual(term)
+    expect(wait).toBeLessThan(term + 1.5)
   },
   30_000,
 )
@@ -1786,19 +1809,20 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   "bot: a long video's download goes on past the time a short one gets",
   async () => {
-    // half time: 3.75 s for a short video, 5.6 s for a long one, and both of
-    // these take 4.5 s
+    // half time: 3.75 s for a short video, 5.6 s for a long one. crawl1
+    // takes 4.5 s, and dholdlong2 never ends by itself (the test doesn't let
+    // it go): each is stopped at its own time limit
     const bot = start(HALF)
     let jobs: string[] = []
     try {
       bot.link(1, 'crawl1')
-      bot.link(2, 'crawllong1')
-      await bot.until(() => bot.videos().length === 1 && bot.statuses(1).some((s) => s.startsWith('😱')), 25_000)
+      bot.link(2, 'dholdlong2')
+      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).some((s) => s.startsWith('😱'))), 25_000)
     } finally {
       jobs = await bot.stop()
     }
-    expect(bot.videos().map((v) => v.chat)).toEqual([2])
-    expect(bot.statuses(1).map((s) => [...s][0])).toEqual(['⏬', '😱'])
+    expect(bot.videos()).toHaveLength(0)
+    for (const chat of [1, 2]) expect(bot.statuses(chat).map((s) => [...s][0])).toEqual(['⏬', '😱'])
     expect(jobs).toHaveLength(2)
     const dl = (line: string) => Number(/ dl=([\d.]+)/.exec(line)![1])
     // the short one is stopped at its 3.75 s, with the 2 MB it had...
@@ -1806,10 +1830,10 @@ test.skipIf(skip)(
     expect(short).toMatch(/^job timeout host=www\.youtube\.com .* dl=\d+\.\d mb=2 total=/)
     expect(dl(short)).toBeGreaterThanOrEqual(3.75)
     expect(dl(short)).toBeLessThan(5.5)
-    // ...while the long one downloads for longer and goes out
+    // ...while the long one downloads on, until its own 5.6 s
     const long = jobs.find((l) => l.includes(' lane=long '))!
-    expect(long).toMatch(/^job ok host=www\.youtube\.com /)
-    expect(dl(long)).toBeGreaterThan(3.75)
+    expect(long).toMatch(/^job timeout host=www\.youtube\.com /)
+    expect(dl(long)).toBeGreaterThanOrEqual(5.6)
   },
   40_000,
 )
@@ -1860,9 +1884,10 @@ test.skipIf(skip)(
     // download from that would read the page again itself: cutflipmulti1's
     // first video is the same when it's read again, and another from the 4th
     // read on, so a download that read it would append that one to the 3 MB;
-    // cutswapmulti1's picks another
+    // cutswapmulti1's picks another. Each has a slot of its own: in turns of
+    // two, the six would take three rounds of runs
     const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
-    const bot = start({ MINUTE_MS: '250', PAGES: pages }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
+    const bot = start({ MINUTE_MS: '250', PAGES: pages, MAX_DOWNLOADS: '6' }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
     let jobs: string[] = []
     const links = ['cut1', 'cutswap1', 'cutembed1', 'cutswapembed1', 'cutflipmulti1', 'cutswapmulti1']
     const read: Record<string, string> = {}
