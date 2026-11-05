@@ -46,6 +46,8 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
   const calls: Call[] = []
   const updates: { update_id: number }[] = []
   let id = 0
+  // the offset of the bot's last getUpdates (taken())
+  let offset = 0
   const me = { id: 1, is_bot: true, first_name: 'Vid', username: 'VidBot' }
   const api = Bun.serve({
     port: 0,
@@ -61,6 +63,7 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       const chat = { id: Number(body.chat_id), type: 'private' }
       if (method === 'getMe') return ok(me)
       if (method === 'getUpdates') {
+        offset = Math.max(offset, body.offset ?? 0)
         const next = updates.filter((u) => u.update_id >= (body.offset ?? 0))
         if (!next.length) await Bun.sleep(100)
         return ok(next)
@@ -332,6 +335,11 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     release(v: string, what: 'J' | 'dl') {
       writeFileSync(join(gates, `${v}.${what}`), '')
     },
+    // whether the bot has taken every update so far: grammY asks for the ones
+    // after a batch only once it has handled it, and by then a link in a
+    // private chat is in deliver() (requested() has nothing to check there,
+    // so handle() starts before grammY goes on)
+    taken: () => offset > updates.length,
     // a deploy's SIGTERM; resolves once the drain has begun, and with
     // CUT_MS=0 (DEPLOY) once it has cut
     async term() {
@@ -522,16 +530,22 @@ test.skipIf(skip)(
     const bot = start()
     let jobs: string[] = []
     const queued = (chat: number) => bot.statuses(chat).some((s) => s.startsWith('⏳'))
+    const downloading = (chat: number) => bot.statuses(chat).some((s) => s.startsWith('⏬'))
     try {
-      // one user's two long links keep the long lane busy...
+      // one user's two long links keep the long lane busy, one downloading
+      // and one in line (a ⏳ alone may be one link's wait for a -J turn
+      // while the other's -J still runs, the lane still free)...
       bot.link(1, 'dholdlong1')
       bot.link(1, 'dholdlong2')
-      await bot.until(() => queued(1))
+      await bot.until(() => queued(1) && downloading(1))
       // ...another user's long link is being described...
       bot.link(2, 'jholddholdlong3')
       await bot.until(() => bot.held('jholddholdlong3', 'J'))
-      // ...and a third user asks for it meanwhile; then the job waits for a slot
+      // ...and a third user asks for it meanwhile: the bot has that request,
+      // following the job, before the -J goes on; then the job waits for a
+      // slot, and both hear so
       bot.link(3, 'jholddholdlong3')
+      await bot.until(() => bot.taken())
       bot.release('jholddholdlong3', 'J')
       await bot.until(() => queued(2) && queued(3))
       // then the downloads go on, in the order the slots come free
