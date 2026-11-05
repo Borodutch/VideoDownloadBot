@@ -69,6 +69,23 @@ import { dirname, join } from 'node:path'
 
 // FAKE_SCALE scales every wait below but `forever`'s (bot.e2e.test.ts halves them for its time limit tests)
 const SCALE = Number(process.env.FAKE_SCALE) || 1
+// The bot running it, and whether that's gone (hold()): the parent has
+// changed, or the test process the bot had is gone (E2E_PARENT_PID, which its
+// runs inherit). That covers a run that a SIGKILL to the whole test run caught
+// while it was starting: its parent never changes then, as it's launchd's,
+// init's or a subreaper's child from the start
+const bot = process.ppid
+const test = Number(process.env.E2E_PARENT_PID)
+const orphan = () => {
+  if (process.ppid !== bot) return true
+  if (!(test > 1)) return false
+  try {
+    process.kill(test, 0)
+    return false
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ESRCH'
+  }
+}
 const sleep = (ms: number) => Bun.sleep(ms * SCALE)
 const args = process.argv.slice(2)
 // A self-update works, unless $UPDATES is set: then each try adds a line to
@@ -106,13 +123,15 @@ const lengthless = reel || url.includes('stream')
 // one with "jhold" in it holds its -J (whether or not it finds a video), one
 // with "dhold" its download and one with "lhold" its check (--list-extractors,
 // above), until the test releases it ($GATES/<id>.J, .dl or .L appears;
-// <id>.J.held says it's held): no timing to race
+// <id>.J.held says it's held, with its pid): no timing to race
 async function hold(v: string, what: 'J' | 'dl' | 'L') {
   const gates = process.env.GATES!
-  writeFileSync(join(gates, `${v}.${what}.held`), '')
+  writeFileSync(join(gates, `${v}.${what}.held`), String(process.pid))
   while (!existsSync(join(gates, `${v}.${what}`))) {
-    // the test is over (a killed bot leaves this run behind)
-    if (!existsSync(gates)) process.exit(1)
+    // the test is over (a killed bot leaves this run behind), or the bot
+    // running it is gone: killed with its whole test run, which then never
+    // removes $GATES
+    if (!existsSync(gates) || orphan()) process.exit(1)
     await Bun.sleep(20)
   }
 }
@@ -194,9 +213,10 @@ if (args.includes('-J')) {
   const first = !existsSync(mark)
   writeFileSync(mark, '')
   // one with "rehold" in it holds every download after the job's first (the
-  // one from the page read again) until the test is over: only the bot stops it
+  // one from the page read again) as "dhold" does, and fails once let go:
+  // the test never lets it go, so only the bot stops it
   if (url.includes('rehold') && !first) {
-    while (existsSync(process.env.GATES!)) await Bun.sleep(20)
+    await hold(id, 'dl')
     process.exit(1)
   }
   const expired = url.includes('expired')

@@ -396,6 +396,10 @@ export function selfUpdate(
 // yt-dlp ran out of time and was stopped
 export class Timeout extends Error {}
 
+// The yt-dlp runs going now, each with a way to end its whole group at once:
+// an e2e bot whose test process is gone ends them as it exits (below)
+const runs = new Set<() => void>()
+
 // Runs yt-dlp, stopped after timeout ms or once signal aborts: then a Timeout
 // or the abort's reason is thrown, unless yt-dlp still exits 0 and its output
 // closes within 5 s of the stop
@@ -430,6 +434,8 @@ async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal
       p.kill(sig)
     }
   }
+  const end = () => kill('SIGKILL')
+  runs.add(end)
   // why the run was stopped, the first time: SIGTERM, and GRACE (5 s) later
   // the run is over, even if something still holds the pipes
   let stopped: Error | undefined
@@ -465,6 +471,7 @@ async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal
     // in turn, neither can one just after the last of it is gone
     if (stopped) kill('SIGKILL')
     over = true
+    runs.delete(end)
     signal?.removeEventListener('abort', abort)
     for (const t of timers) clearTimeout(t)
   }
@@ -1879,6 +1886,22 @@ function main() {
 }
 
 if (import.meta.main) {
+  // An e2e bot exits once its test process is gone, and its yt-dlp runs'
+  // groups go with it: a test run killed outright (a SIGKILL, a worker's time
+  // limit) can't stop its bots, and one left behind would poll its fake Bot
+  // API's port for good, which a later test's fake may get (#460).
+  // E2E_PARENT_PID is that process's pid (bot.e2e.test.ts); once it's gone,
+  // the bot is another process's child (launchd's, init's or a subreaper's).
+  // Production sets no E2E_PARENT_PID, and nothing watches (nor for 1 or less:
+  // a container's PID 1 bot has the parent 0)
+  const parent = Number(env.E2E_PARENT_PID)
+  if (parent > 1)
+    setInterval(() => {
+      if (process.ppid === parent) return
+      runs.forEach((end) => end())
+      console.error(`E2E_PARENT_PID ${parent} is gone (the parent is ${process.ppid} now), exiting`)
+      process.exit(1)
+    }, 1000).unref()
   if (!env.EGRESS_DENY?.trim())
     console.warn("EGRESS_DENY is empty: the host's own public addresses are reachable")
   await SCRATCH.start()

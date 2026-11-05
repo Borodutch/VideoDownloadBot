@@ -16,7 +16,8 @@ import { arm, type Campaign } from './promo'
 // test/yt-dlp has the rest).
 // MAX_DOWNLOADS=2: one slot for long videos, the other for short ones. env
 // adds to or overrides the bot's environment, delay = how long the fake Bot
-// API takes to answer a call, in ms, or what it waits for (a gate()).
+// API takes to answer a call, in ms, or what it waits for (a gate()), via = a
+// command that runs bot.ts in this process's stead (test/parent.ts).
 type Call = {
   method: string
   chat: number
@@ -45,7 +46,11 @@ if (Bun.which('ffmpeg'))
   Bun.spawnSync(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=s=320x240:d=2', '-pix_fmt', 'yuv420p', mp4])
 afterAll(() => rmSync(fixture, { recursive: true, force: true }))
 
-function start(env: Record<string, string> = {}, delay: (call: Call) => number | Promise<unknown> = () => 0) {
+function start(
+  env: Record<string, string> = {},
+  delay: (call: Call) => number | Promise<unknown> = () => 0,
+  via: string[] = [],
+) {
   const work = mkdtempSync(join(tmpdir(), 'bot-e2e-'))
   const gates = join(work, 'gates')
   mkdirSync(gates)
@@ -157,10 +162,12 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
   // The bot talks to the fake Bot API at 127.0.0.1 directly: a proxy in the
   // test's environment (an HTTP_PROXY without a NO_PROXY, which Bun's fetch
   // follows) would carry each call, and a busy one fails some with a 502
-  const bot = Bun.spawn([process.execPath, 'bot.ts'], {
+  const bot = Bun.spawn([...via, process.execPath, 'bot.ts'], {
     cwd: import.meta.dir,
     env: {
       ...proxyFreeEnv(),
+      // the bot exits once this process is gone, as when a test run is killed
+      E2E_PARENT_PID: String(process.pid),
       PATH: `${join(import.meta.dir, 'test')}:${process.env.PATH}`,
       TOKEN: '1:test',
       BOT_API_URL: `http://127.0.0.1:${api.port}`,
@@ -405,9 +412,15 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     // the status texts a chat got, sent or edited
     statuses: (chat: number) =>
       calls.filter((c) => c.chat === chat && /^(sendMessage|editMessageText)$/.test(c.method)).map((c) => c.text!),
-    // whether a "jhold" link's -J, a "dhold" link's download or an "lhold"
-    // link's check (--list-extractors) is held, and lets it go on (test/yt-dlp)
+    // whether a "jhold" link's -J, a "dhold" link's download (a "rehold"
+    // one's from the page read again) or an "lhold" link's check
+    // (--list-extractors) is held, and lets it go on (test/yt-dlp)
     held: (v: string, what: 'J' | 'dl' | 'L') => existsSync(join(gates, `${v}.${what}.held`)),
+    // the pid of that held run, 0 until it's held
+    holder(v: string, what: 'J' | 'dl' | 'L') {
+      const file = join(gates, `${v}.${what}.held`)
+      return existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0
+    },
     release(v: string, what: 'J' | 'dl' | 'L') {
       writeFileSync(join(gates, `${v}.${what}`), '')
     },
@@ -426,6 +439,10 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     },
     // the bot's job log lines so far
     jobs: () => lines.filter((l) => l.startsWith('job ')),
+    // the bot's stderr lines so far
+    stderr: () => errors,
+    // the pid of what start() spawned: the bot, or via's command
+    pid: bot.pid,
     // a deploy's SIGTERM; resolves once the drain has begun, and with
     // CUT_MS=0 (DEPLOY) once it has cut
     async term() {
@@ -1833,9 +1850,10 @@ e2e(
 e2e(
   'bot: on a deploy, a job at "⏫" still probing its file at the exit hears to send the link again',
   async () => {
-    // an ffprobe that doesn't end before the exit (nor outlive the test)
+    // an ffprobe that doesn't end before the exit, nor outlive the test or
+    // its bot (whose exit with a killed test run doesn't end it, #460)
     const bin = mkdtempSync(join(tmpdir(), 'bot-e2e-bin-'))
-    writeFileSync(join(bin, 'ffprobe'), `#!/bin/sh\nwhile [ -d "${bin}" ]; do sleep 0.1; done\n`)
+    writeFileSync(join(bin, 'ffprobe'), `#!/bin/sh\nwhile [ -d "${bin}" ] && kill -0 $PPID 2>/dev/null; do sleep 0.1; done\n`)
     chmodSync(join(bin, 'ffprobe'), 0o755)
     const bot = start({ ...DEPLOY, PATH: `${bin}:${join(import.meta.dir, 'test')}:${process.env.PATH}` })
     let jobs: string[] = []
@@ -2388,6 +2406,213 @@ e2e(
   },
   30_000,
 )
+
+e2e(
+  'bot: a bot whose test process is killed outright exits within seconds, and so does its yt-dlp run',
+  async () => {
+    // test/parent.ts stands in for this process: it runs the bot as the
+    // harness does, writes the bot's pid to <dir>/bot, and gets the SIGKILL a
+    // test run gets from a time limit. The bot is downloading
+    // stubbornffmpeg1, whose yt-dlp run waits for a child in its group that
+    // ignores SIGTERM and never ends by itself (its pid in LINGER): only the
+    // bot would end it before the test is over
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-orphan-'))
+    const pid = (name: string) => {
+      const path = join(dir, name)
+      return existsSync(path) ? Number(readFileSync(path, 'utf8')) : 0
+    }
+    const bot = start({ LINGER: dir }, undefined, [
+      process.execPath,
+      join(import.meta.dir, 'test', 'parent.ts'),
+      join(dir, 'bot'),
+    ])
+    try {
+      bot.link(1, 'stubbornffmpeg1')
+      await bot.until(() => pid('bot') > 0 && pid('stubbornffmpeg1.pid') > 0)
+      const pids = [pid('bot'), pid('stubbornffmpeg1.pid')]
+      // both still there once the bot's checks for its test process (one a
+      // second) have begun: while that process is there, the bot stays
+      await Bun.sleep(1500)
+      expect(pids.map(alive)).toEqual([true, true])
+      bot.kill()
+      // the bot checks for its test process every second
+      await bot.until(() => !pids.some(alive), 10_000)
+    } finally {
+      // what a failure left behind, however far it got (a bot left running
+      // would hold the output stop() reads to its end)
+      for (const p of [pid('bot'), pid('stubbornffmpeg1.pid')]) if (p > 1 && alive(p)) process.kill(p, 'SIGKILL')
+      await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+    // and it says why it exited: the stand-in (not this process) was gone,
+    // and it had another parent by then
+    const why = bot.stderr().filter((l) => l.startsWith('E2E_PARENT_PID '))
+    expect(why).toHaveLength(1)
+    expect(why[0]).toMatch(new RegExp(`^E2E_PARENT_PID ${bot.pid} is gone \\(the parent is \\d+ now\\), exiting$`))
+    expect(why[0]).not.toContain(`the parent is ${bot.pid} `)
+  },
+  // the first wait's 25 s at most (the bot slow to start), 1.5 s, then 10 s
+  45_000,
+)
+
+e2e(
+  'test/parent.ts: a stand-in whose test process is killed outright exits, and so its bot and yt-dlp run go too',
+  async () => {
+    // Two stand-ins deep: the first (A) stands in for a one-file bun test,
+    // whose tests run in its own process, and gets the SIGKILL. The second
+    // (B) is the stand-in of the test above, writes the bot's pid to
+    // <dir>/bot, and is A's child (its pid in <dir>/b). B can't be stopped by
+    // A, and while B is there, so is the bot's parent: only B's own check of
+    // its parent would end the two, and the stubborn child of the bot's
+    // stubbornffmpeg1 run with them, before the test is over
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-orphan-'))
+    const pid = (name: string) => {
+      const path = join(dir, name)
+      return existsSync(path) ? Number(readFileSync(path, 'utf8')) : 0
+    }
+    const parent = [process.execPath, join(import.meta.dir, 'test', 'parent.ts')]
+    const bot = start({ LINGER: dir }, undefined, [...parent, join(dir, 'b'), ...parent, join(dir, 'bot')])
+    let pids: number[] = []
+    try {
+      bot.link(1, 'stubbornffmpeg1')
+      await bot.until(() => pid('b') > 0 && pid('bot') > 0 && pid('stubbornffmpeg1.pid') > 0)
+      pids = [pid('b'), pid('bot'), pid('stubbornffmpeg1.pid')]
+      // all still there once B's checks (five a second) and the bot's (one a
+      // second) have begun: while A is there, they stay
+      await Bun.sleep(1500)
+      expect(pids.map(alive)).toEqual([true, true, true])
+      bot.kill()
+      // B's check, then the bot's
+      await bot.until(() => !pids.some(alive), 10_000)
+    } finally {
+      for (const p of [pid('b'), pid('bot'), pid('stubbornffmpeg1.pid')]) if (p > 1 && alive(p)) process.kill(p, 'SIGKILL')
+      await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+    // B says it exited as A (not this process) was gone, and the bot that it
+    // exited as B was
+    const said = (what: string) => bot.stderr().filter((l) => l.startsWith(what))
+    expect(said('test/parent.ts: ')).toHaveLength(1)
+    expect(said('test/parent.ts: ')[0]).toMatch(
+      new RegExp(`^test/parent\\.ts: E2E_PARENT_PID ${bot.pid} is gone \\(the parent is \\d+ now\\), exiting$`),
+    )
+    expect(said('test/parent.ts: ')[0]).not.toContain(`the parent is ${bot.pid} `)
+    expect(said('E2E_PARENT_PID ')).toHaveLength(1)
+    expect(said('E2E_PARENT_PID ')[0]).toMatch(new RegExp(`^E2E_PARENT_PID ${pids[0]} is gone \\(the parent is \\d+ now\\), exiting$`))
+    expect(said('E2E_PARENT_PID ')[0]).not.toContain(`the parent is ${pids[0]} `)
+  },
+  // the first wait's 25 s at most (the bot slow to start), 1.5 s, then 10 s
+  45_000,
+)
+
+e2e(
+  'bot: a bot whose test process was gone before its first check exits all the same',
+  async () => {
+    // as when a test run is killed outright just after it spawned a bot: sh
+    // stands in for the test process, runs the bot with its own pid as
+    // E2E_PARENT_PID, writes the bot's pid to <dir>/bot and exits at once.
+    // The bot's parent is launchd, init or a subreaper by the time it checks
+    // first, so only E2E_PARENT_PID, not the parent it began with, shows that
+    // its test process is gone
+    const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-orphan-'))
+    const file = join(dir, 'bot')
+    const pid = () => (existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0)
+    const run = 'f=$1; shift; E2E_PARENT_PID=$$ "$@" & echo $! > "$f"'
+    const bot = start({}, undefined, ['sh', '-c', run, 'sh', file])
+    try {
+      await bot.until(() => pid() > 0 && !alive(pid()))
+    } finally {
+      if (pid() > 1 && alive(pid())) process.kill(pid(), 'SIGKILL')
+      await bot.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+    const why = bot.stderr().filter((l) => l.startsWith('E2E_PARENT_PID '))
+    expect(why).toHaveLength(1)
+    expect(why[0]).toMatch(new RegExp(`^E2E_PARENT_PID ${bot.pid} is gone \\(the parent is \\d+ now\\), exiting$`))
+  },
+  // one wait, 25 s at most (the bot slow to start)
+  30_000,
+)
+
+e2e(
+  'bot: a yt-dlp run held at a gate ends once its bot is gone',
+  async () => {
+    // as when a SIGKILL ends a test run's whole process group: the bot goes
+    // before it can end its runs, and the test never removes $GATES, which a
+    // held run otherwise waits for
+    const bot = start()
+    let held = 0
+    try {
+      bot.link(1, 'dhold1')
+      await bot.until(() => bot.holder('dhold1', 'dl') > 0)
+      held = bot.holder('dhold1', 'dl')
+      expect(alive(held)).toBe(true)
+      bot.kill()
+      await bot.until(() => !alive(held), 5_000)
+    } finally {
+      if (held > 1 && alive(held)) process.kill(held, 'SIGKILL')
+      await bot.stop()
+    }
+  },
+  // the first wait's 25 s at most (the bot slow to start), then 5 s
+  40_000,
+)
+
+e2e(
+  'bot: a download from a page read again, held till the test is over, ends once its bot is gone',
+  async () => {
+    // A minute is 1 s and "Downloading…" takes 1.5 s to show, so the -J info
+    // is stale by the download. expiredrehold1's download from it fails after
+    // 2 s (half the fake's times), the page is read again, and the download
+    // from that is held for good ("rehold"): only the bot stops it, in the
+    // 30 s its job has, which leaves start-ups on a loaded machine room
+    const bot = start({ MINUTE_MS: '1000', FAKE_SCALE: '0.5' }, (c) => (c.text?.startsWith('⏬') ? 1500 : 0))
+    let held = 0
+    try {
+      bot.link(1, 'expiredrehold1')
+      // 25 s, also once the bot is up: four fake yt-dlp starts and 3.5 s of
+      // fixed waits come before the held download
+      await bot.until(() => bot.holder('expiredrehold1', 'dl') > 0, 25_000)
+      held = bot.holder('expiredrehold1', 'dl')
+      expect(alive(held)).toBe(true)
+      bot.kill()
+      await bot.until(() => !alive(held), 5_000)
+    } finally {
+      if (held > 1 && alive(held)) process.kill(held, 'SIGKILL')
+      await bot.stop()
+    }
+  },
+  // the first wait's 25 s at most, then 5 s
+  40_000,
+)
+
+test('test/yt-dlp: a held run whose bot was gone before it began ends all the same', async () => {
+  // as when a SIGKILL ends a test run's whole process group while a bot's
+  // yt-dlp run is starting: the run's parent is launchd, init or a subreaper
+  // from the start, and the test process the bot had is gone. A subshell that
+  // sh left behind starts it 0.3 s later, no bot at all, with the pid of a
+  // process that has ended as its E2E_PARENT_PID
+  const ended = Bun.spawn(['true'])
+  await ended.exited
+  const gates = mkdtempSync(join(tmpdir(), 'bot-e2e-gates-'))
+  const file = join(gates, 'dhold1.dl.held')
+  let held = 0
+  try {
+    const run = `(sleep 0.3; exec "$0" "$1" https://www.youtube.com/watch?v=dhold1) </dev/null >/dev/null 2>&1 &`
+    Bun.spawnSync(['sh', '-c', run, process.execPath, join(import.meta.dir, 'test', 'yt-dlp')], {
+      env: { ...proxyFreeEnv(), GATES: gates, E2E_PARENT_PID: String(ended.pid) },
+    })
+    const end = performance.now() + 10_000
+    while (!(held = existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0) && performance.now() < end)
+      await Bun.sleep(20)
+    expect(held).toBeGreaterThan(1)
+    while (alive(held) && performance.now() < end) await Bun.sleep(20)
+    expect(alive(held)).toBe(false)
+  } finally {
+    if (held > 1 && alive(held)) process.kill(held, 'SIGKILL')
+    rmSync(gates, { recursive: true, force: true })
+  }
+}, 15_000)
 
 e2e(
   "bot: a pipe holder that left a timed-out run's group doesn't keep the job",
