@@ -1585,9 +1585,10 @@ test.skipIf(skip)(
     // long video's job has 5.6 s. dholdlong1 holds the long slot until two
     // minutes after endlessstream2 is in line for it, by when
     // endlessstream2's saved info is stale, so a failed download of it would
-    // read the page again. Its file passes 2000 MB 0.25 s in, and its yt-dlp
-    // would go on for 10 s. It leaves a process in its group that ignores the
-    // stop's SIGTERM, doesn't hold its output and lives until the test is
+    // read the page again. Its file passes 2000 MB 0.25 s in at the earliest,
+    // and its yt-dlp would go on for 10 s. It leaves a process in its group
+    // that ignores the stop's SIGTERM (the file passes 2000 MB only once that
+    // process is up), doesn't hold its output and lives until the test is
     // over: it gets the SIGKILL as the run ends. parts3 has a merge on disk,
     // each file 2000 MB at most and 4000 MB together, and goes out.
     const dir = mkdtempSync(join(tmpdir(), 'bot-e2e-linger-'))
@@ -1605,18 +1606,19 @@ test.skipIf(skip)(
       await Bun.sleep(250)
       bot.release('dholdlong1', 'dl')
       await bot.until(() => bot.videos().length === 2 && bot.statuses(2).some((s) => s.startsWith('😱')))
-      // the lingering process (its log is named <link>.<its pid>) is gone
-      // within a second of the run's end
-      const pid = Number(readdirSync(dir)[0]!.split('.').pop())
-      for (let i = 0; i < 20 && alive(pid); i++) await Bun.sleep(50)
-      gone = !alive(pid)
+      // the lingering process (its log, there before the stop, is named
+      // <link>.<its pid>) is gone within a second of the run's end
+      const [name] = readdirSync(dir)
+      const pid = name ? Number(name.split('.').pop()) : 0
+      for (let i = 0; i < 20 && pid && alive(pid); i++) await Bun.sleep(50)
+      gone = pid > 0 && !alive(pid)
       lingered = log()
     } finally {
       jobs = await bot.stop()
       rmSync(dir, { recursive: true, force: true })
     }
-    expect(gone).toBe(true)
     expect(lingered).toEqual(['up\n'])
+    expect(gone).toBe(true)
     expect(bot.videos().map((v) => v.chat).sort()).toEqual([1, 3])
     expect(bot.statuses(2).map((s) => [...s][0])).toEqual(['⏳', '⏬', '😱'])
     expect(bot.statuses(2).at(-1)).toBe(t('en', 'tooBig'))

@@ -45,7 +45,8 @@
 // when the child is; with $LINGER set it also leaves a
 // process in its group that ignores SIGTERM, doesn't hold its output, writes
 // "up" to $LINGER/<id>.<its pid> and lives until the test is over (its $GATES
-// dir is gone), a minute at most: only a SIGKILL stops it sooner; one with
+// dir is gone), a minute at most: only a SIGKILL stops it sooner, and the
+// file passes 2000 MB only once it has written "up"; one with
 // "parts" in it has a merge on disk for 1 s, 1900 and 100 MB parts and their
 // 2000 MB merged copy, v.temp.mp4 at first and v.mp4 from 0.5 s on, as a
 // merge renames it before the parts go)
@@ -234,13 +235,27 @@ if (args.includes('-J')) {
   if (url.includes('endless')) {
     // before the file is too big: a stop would miss a child forked as it comes
     const child = Bun.spawn(['sleep', String(20 * SCALE)], { stdout: 'inherit', stderr: 'inherit', detached: url.includes('escape') })
-    if (process.env.LINGER)
-      Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; i=0; while [ -d "$GATES" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done`], {
-        env: { ...process.env, V: new URL(url).searchParams.get('v')! },
-        stdio: ['ignore', 'ignore', 'ignore'],
-      }).unref()
+    const linger = process.env.LINGER
+      ? Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; i=0; while [ -d "$GATES" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done`], {
+          env: { ...process.env, V: new URL(url).searchParams.get('v')! },
+          stdio: ['ignore', 'ignore', 'ignore'],
+        })
+      : undefined
+    linger?.unref()
     writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
     await sleep(500)
+    // and too big only once that process has written "up" (its trap is set
+    // by then): a stop before that, as a loaded machine may start the sh
+    // late, would kill it before it wrote a thing, by the SIGTERM if its trap
+    // isn't set yet, or else by the SIGKILL as the run ends (#453)
+    if (linger) {
+      const up = join(process.env.LINGER!, `${id}.${linger.pid}`)
+      while (!statSync(up, { throwIfNoEntry: false })?.size) {
+        // the test is over (a killed bot leaves this run behind)
+        if (!existsSync(process.env.GATES!)) process.exit(1)
+        await Bun.sleep(10)
+      }
+    }
     sparse(`${out}.part`, 2001)
     await child.exited
     renameSync(`${out}.part`, out)
