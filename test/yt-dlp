@@ -28,11 +28,11 @@
 // in without a word, as at --max-filesize; one with "expired" in it fails after
 // 4 s the first time in a job's dir, from the saved info, as an expired media
 // link would, and crawls the next time, from the page read again; one with
-// "cut" in it writes 5 MB of its format's letter instead, but the first time
-// in a job's dir fails 3 MB in (2 MB with "swap" in it), and goes on from the
-// bytes a v.mp4.part already has whatever format they are, as yt-dlp's
-// --continue does, noted in $PAGES/<id>; one with "linger" in it first
-// leaves a process in its group that
+// "cut" in it writes 5 MB instead, FAKE_MP4 and then its format's letter,
+// but the first time in a job's dir fails 3 MB in (2 MB with "swap" in it),
+// and goes on from the bytes a v.mp4.part already has whatever format they
+// are, as yt-dlp's --continue does, noted in $PAGES/<id>; one with "linger"
+// in it first leaves a process in its group that
 // doesn't hold its output and outlives it by 15 s, writing "up", then "done"
 // or "TERM" if it got SIGTERM, to $LINGER/<id>.<its pid>, or with "deaf" in it
 // too one that ignores SIGTERM, writes "up" there and never ends by itself
@@ -203,15 +203,19 @@ if (args.includes('-J')) {
     // the format's letter: the clip its link picks, or its file's name
     const media = saved && new URL(saved.url)
     const letter = (media ? (media.searchParams.get('clip') ?? media.pathname.split('/').pop()![0]!) : read()).charCodeAt(0)
+    // the format's 5 MB: FAKE_MP4, which the bot takes its thumbnail from,
+    // then its letter
+    const whole = new Uint8Array(5 * 2 ** 20).fill(letter)
+    whole.set(readFileSync(process.env.FAKE_MP4!))
     const part = `${out}.part`
     if (first) {
-      writeFileSync(part, new Uint8Array((url.includes('swap') ? 2 : 3) * 2 ** 20).fill(letter))
+      writeFileSync(part, whole.subarray(0, (url.includes('swap') ? 2 : 3) * 2 ** 20))
       console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden')
       process.exit(1)
     }
     const have = existsSync(part) ? statSync(part).size : 0
     if (have && pages) appendFileSync(join(pages, id), `resumed ${have}\n`)
-    appendFileSync(part, new Uint8Array(5 * 2 ** 20 - have).fill(letter))
+    appendFileSync(part, whole.subarray(have))
     renameSync(part, out)
     console.log(out)
     process.exit(0)

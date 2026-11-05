@@ -33,11 +33,15 @@ type Call = {
   at: number
 }
 // The video every fake download copies (FAKE_MP4), made once: an ffmpeg run
-// per test, in spawnSync, would hold up all the concurrent ones (0.4 s each)
+// per test, in spawnSync, would hold up all the concurrent ones (0.4 s each).
+// It lasts 2 s because the bot takes its thumbnail 1 s into a video whose -J
+// gives its length (test/yt-dlp's last 30 s or more): a 1 s file has no frame
+// there, and each such video sent would fail its thumbnail and fill the bot's
+// stderr with ffmpeg's errors
 const fixture = mkdtempSync(join(tmpdir(), 'bot-e2e-mp4-'))
 const mp4 = join(fixture, 'v.mp4')
 if (Bun.which('ffmpeg'))
-  Bun.spawnSync(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=s=320x240:d=1', '-pix_fmt', 'yuv420p', mp4])
+  Bun.spawnSync(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=s=320x240:d=2', '-pix_fmt', 'yuv420p', mp4])
 afterAll(() => rmSync(fixture, { recursive: true, force: true }))
 
 function start(env: Record<string, string> = {}, delay: (call: Call) => number | Promise<unknown> = () => 0) {
@@ -509,7 +513,10 @@ test.skipIf(skip)(
     // the second long one waited for the first, its user's own
     expect(jobs.some((l) => /lane=long ahead=0 own=1 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toBe(true)
   },
-  30_000,
+  // its five waits and its 2 s pause come one after another, and under load
+  // the last wait has begun almost 15 s in: a timeout of it must still end,
+  // with its report, before the test's own timeout does
+  45_000,
 )
 
 test.skipIf(skip)(
@@ -546,7 +553,11 @@ test.skipIf(skip)(
     expect(jobs.filter((l) => /^job ok .*lane=short ahead=0 own=0 dur=\? wait=0\.0 /.test(l))).toHaveLength(1)
     expect(jobs.filter((l) => /^job ok .*lane=long ahead=0 own=0 dur=\? wait=([2-9]|\d{2,})\./.test(l))).toHaveLength(1)
   },
-  30_000,
+  // its three waits and its 2 s pause come one after another, 57 s at most
+  // by their budgets (the first wait's is 25 s: until() counts its 15 s
+  // from when the bot is up): a timeout of the last must still end, with
+  // its report, before the test's own timeout does
+  60_000,
 )
 
 test.skipIf(skip)(
@@ -2215,7 +2226,11 @@ test.skipIf(skip)(
     // ended, with no grace time to wait out
     expect(Number(/ dl=([\d.]+)/.exec(line)![1])).toBeGreaterThanOrEqual(0.25)
   },
-  30_000,
+  // its three waits and its 2 s pause come one after another, 57 s at most
+  // by their budgets (the first wait's is 25 s: until() counts its 15 s
+  // from when the bot is up): a timeout of the last must still end, with
+  // its report, before the test's own timeout does
+  60_000,
 )
 
 test.skipIf(skip)(
@@ -2289,7 +2304,11 @@ test.skipIf(skip)(
     expect(wait).toBeGreaterThanOrEqual(term)
     expect(wait).toBeLessThan(term + 1.5)
   },
-  30_000,
+  // its three waits come one after another, 25 s (until() counts the first
+  // one's 15 s from when the bot is up), 15 s and then 25 s at most by their
+  // budgets: a timeout of the last must still end, with its report, before
+  // the test's own timeout does
+  70_000,
 )
 
 test.skipIf(skip)(
@@ -2403,8 +2422,11 @@ test.skipIf(skip)(
       bot.link(1, 'linger1')
       bot.link(2, 'lingerbroken1')
       await bot.until(() => bot.videos().length === 1 && bot.statuses(2).some((s) => s.startsWith('😱')))
-      // past both signals' times
-      for (let i = 0; i < 400 && !(logs().length >= 2 && logs().every(([, l]) => /TERM|done/.test(l))); i++)
+      // past both signals' times, or 20 s at most, by the clock: a count of
+      // sleeps stretches with the load and could run into the test's own
+      // timeout, which would hide what the logs say
+      const end = performance.now() + 20_000
+      while (performance.now() < end && !(logs().length >= 2 && logs().every(([, l]) => /TERM|done/.test(l))))
         await Bun.sleep(50)
       seen = logs()
     } finally {
@@ -2417,7 +2439,10 @@ test.skipIf(skip)(
     expect(new Set(seen.map(([v]) => v))).toEqual(new Set(['linger1', 'lingerbroken1']))
     for (const [, log] of seen) expect(log).toBe('up\ndone\n')
   },
-  30_000,
+  // its wait may take 25 s (until() counts its 15 s from when the bot is up)
+  // and then the loop 20 s, and what the logs say must still come out before
+  // the test's own timeout does
+  50_000,
 )
 
 test.skipIf(skip)(
@@ -2523,8 +2548,15 @@ test.skipIf(skip)(
       }
       return all
     }
-    const sent = (chat: number) => runs(bot.videos().find((c) => c.chat === chat)!.file!)
-    expect(links.map((_, i) => sent(i + 1))).toEqual(['a', 'b', 'a', 'b', 'a', 'b'].map((x) => [[x, 5 * 2 ** 20]]))
+    // a video's 5 MB are FAKE_MP4 (so its thumbnail works), then its
+    // format's letter: one run of it, with none of another format's
+    const sent = (chat: number) => {
+      const file = bot.videos().find((c) => c.chat === chat)!.file!
+      return [bot.mp4.equals(file.subarray(0, bot.mp4.length)), runs(file.subarray(bot.mp4.length))]
+    }
+    expect(links.map((_, i) => sent(i + 1))).toEqual(
+      ['a', 'b', 'a', 'b', 'a', 'b'].map((x) => [true, [[x, 5 * 2 ** 20 - bot.mp4.length]]]),
+    )
     // the pages read by the -Js alone: the downloads were from what they
     // picked, a post's first video too
     expect(read).toEqual({
@@ -2618,7 +2650,7 @@ test.skipIf(skip)(
     const sent = files(bot.calls).find((c) => c.chat === 1)!
     expect([sent.title, sent.performer, sent.duration]).toEqual(['Next', 'Someone', 40])
     expect(sent.caption).toStartWith('<a href="https://www.youtube.com/watch?v=new1">Next</a>')
-    // new1's download, not old1's format (5 MB of "a")
+    // new1's download, not old1's format (5 MB: FAKE_MP4, then "a")
     expect(bot.mp4.equals(sent.file!)).toBe(true)
     expect(jobs).toHaveLength(5)
     expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* reread=1 dropped=3 other=1 dl=\d+\.\d mb=0 up=/.test(l))).toHaveLength(1)
@@ -2627,7 +2659,10 @@ test.skipIf(skip)(
     expect(jobs.filter((l) => /^job cached host=www\.youtube\.com metaq=\S+ meta=\S+ total=/.test(l))).toHaveLength(1)
     expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* dur=30 wait=\S+ dl=/.test(l))).toHaveLength(2)
   },
-  30_000,
+  // its four waits come one after another, and under load the last one has
+  // begun almost 15 s in: a timeout of it must still end, with its report,
+  // before the test's own timeout does
+  45_000,
 )
 
 test.skipIf(skip)(
@@ -2664,7 +2699,7 @@ test.skipIf(skip)(
     ])
     const sent = files(bot.calls).find((c) => c.chat === 1)!
     expect([sent.title, sent.performer, sent.duration]).toEqual(['Next', 'Someone', 40])
-    // new1's download, not old1's format (5 MB of "a")
+    // new1's download, not old1's format (5 MB: FAKE_MP4, then "a")
     expect(bot.mp4.equals(sent.file!)).toBe(true)
     expect(jobs).toHaveLength(3)
     expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* reread=1 dropped=3 other=1 dl=\d+\.\d mb=0 up=/.test(l))).toHaveLength(1)
