@@ -727,6 +727,13 @@ test.skipIf(skip)(
     // sized): creating sent waits for it
     const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
     const db = new Database(join(data, 'bot.sqlite'))
+    // The COMMIT that lets the bot go needs the lock that shuts out readers
+    // (EXCLUSIVE), and with each try for the write lock the bot holds a
+    // reader's lock for a moment: the COMMIT waits that out rather than fail
+    // at once (bun:sqlite's busy_timeout is 0). They can't wait on each
+    // other: the bot lets go of it before each sleep, and the waiting COMMIT
+    // keeps it from taking it again.
+    db.run('PRAGMA busy_timeout = 10000')
     db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
     db.run('CREATE TABLE sized (file_id TEXT PRIMARY KEY)')
     db.run('BEGIN IMMEDIATE')
