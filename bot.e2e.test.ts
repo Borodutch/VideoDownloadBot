@@ -3,6 +3,7 @@ import { afterAll, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { proxyFreeEnv } from './egress'
 import { t } from './i18n'
 import { arm, type Campaign } from './promo'
 
@@ -114,10 +115,13 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       return ok(true)
     },
   })
+  // The bot talks to the fake Bot API at 127.0.0.1 directly: a proxy in the
+  // test's environment (an HTTP_PROXY without a NO_PROXY, which Bun's fetch
+  // follows) would carry each call, and a busy one fails some with a 502
   const bot = Bun.spawn([process.execPath, 'bot.ts'], {
     cwd: import.meta.dir,
     env: {
-      ...process.env,
+      ...proxyFreeEnv(),
       PATH: `${join(import.meta.dir, 'test')}:${process.env.PATH}`,
       TOKEN: '1:test',
       BOT_API_URL: `http://127.0.0.1:${api.port}`,
@@ -134,19 +138,25 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       ...env,
     },
     stdout: 'pipe',
-    stderr: 'ignore',
+    stderr: 'pipe',
   })
-  // the bot's stdout lines so far
+  // the bot's stdout and stderr lines so far (stderr has its console.error
+  // lines and its ffmpeg runs' errors)
   const lines: string[] = []
+  const errors: string[] = []
+  // termed: term() has sent the SIGTERM; failed: an until() ran out
   let termed = false
-  const reading = (async () => {
+  let failed = false
+  const read = async (stream: typeof bot.stdout, into: string[]) => {
     let rest = ''
-    for await (const chunk of bot.stdout.pipeThrough(new TextDecoderStream())) {
+    for await (const chunk of stream.pipeThrough(new TextDecoderStream())) {
       const parts = (rest + chunk).split('\n')
       rest = parts.pop()!
-      lines.push(...parts)
+      into.push(...parts)
     }
-  })()
+    if (rest) into.push(rest)
+  }
+  const reading = Promise.all([read(bot.stdout, lines), read(bot.stderr, errors)])
   // a message from user with a link to video v (and whatever else follows
   // it in the query)
   const message = (user: number, v: string) => {
@@ -278,9 +288,39 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     },
     // the status texts the guest replies got
     inline: () => calls.filter((c) => c.inline && c.method === 'editMessageText').map((c) => c.text!),
+    // Waits for done() to hold, ms of wall-clock time at most. One that runs
+    // out fails with where it was (its lines in this file, the test's last),
+    // what it waited for, the bot's last stderr and stdout lines and its
+    // last Bot API calls (getMe and getUpdates aside)
     async until(done: () => boolean, ms = 15_000) {
-      for (let i = 0; i < ms / 50 && !done(); i++) await Bun.sleep(50)
-      expect(done()).toBe(true)
+      // the callers' frames, taken before an await drops them
+      const at = (new Error().stack ?? '')
+        .split('\n')
+        .slice(2)
+        .map((l) => /bot\.e2e\.test\.ts:(\d+)/.exec(l)?.[1])
+        .filter(Boolean)
+      const begun = performance.now()
+      while (!done()) {
+        const waited = performance.now() - begun
+        if (waited >= ms) {
+          const tail = (what: string, of: string[]) =>
+            `${what}, last ${Math.min(of.length, 30)} of ${of.length}:\n${of.slice(-30).join('\n') || '(none)'}`
+          // (a call with no chat_id, as deleteWebhook, has chat NaN)
+          const made = calls.map(
+            (c) => `${c.method} ${Number.isNaN(c.chat) ? '-' : c.chat}${c.text ? ` ${JSON.stringify(c.text.slice(0, 60))}` : ''}`,
+          )
+          failed = true
+          throw new Error(
+            [
+              `until() at bot.e2e.test.ts:${at.join(' < ') || '?'} not done after ${(waited / 1000).toFixed(1)} s: ${done}`,
+              tail('bot stderr lines', errors),
+              tail('bot stdout lines', lines),
+              tail('Bot API calls', made),
+            ].join('\n'),
+          )
+        }
+        await Bun.sleep(50)
+      }
     },
     videos: () => calls.filter((c) => c.method === 'sendVideo'),
     // the status texts a chat got, sent or edited
@@ -307,9 +347,13 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       bot.kill('SIGKILL')
     },
     // SIGTERM, as on a deploy (unless term() has sent it: a second one
-    // kills), then the bot's end; resolves to its job log lines
+    // kills), then the bot's end; resolves to its job log lines. After an
+    // until() that ran out it's SIGKILL: the test never let go of what it
+    // holds (a download, a gate), and a drain waiting on that would outlast
+    // the test's own timeout, which would hide the until()'s failure
     async stop() {
-      if (!termed) bot.kill('SIGTERM')
+      if (failed) bot.kill('SIGKILL')
+      else if (!termed) bot.kill('SIGTERM')
       await bot.exited
       // the answers to calls still on their way
       await Bun.sleep(100)
