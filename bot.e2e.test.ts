@@ -407,15 +407,25 @@ test.skipIf(skip)(
     const bot = start()
     let jobs: string[] = []
     try {
-      // one user's two long links go one at a time...
-      bot.link(1, 'long1')
-      await bot.until(() => bot.statuses(1).length > 0)
+      // one user's two long links go one at a time: the first one downloads
+      // (its ⏬ is up and its -J turn over) and holds the long slot until the
+      // test lets it go on...
+      bot.link(1, 'dholdlong1')
+      await bot.until(() => bot.held('dholdlong1', 'dl'))
+      // ...so the second one, its -J turn free, is in line for that slot
       bot.link(1, 'long2')
       await bot.until(() => bot.statuses(1).some((s) => s.startsWith('⏳')))
       // ...and another user's short link doesn't wait for them
       bot.link(2, 'short1')
-      // a third user asks for the queued video (long2) too
+      await bot.until(() => bot.videos().length === 1)
+      // a third user asks for the queued video (long2) too: the bot has that
+      // request, following the job, while the job is still in line
       bot.link(3, 'long2')
+      await bot.until(() => bot.taken())
+      // the second long one waits 2 s at least; then the first one's
+      // download goes on, and the second one's after it
+      await Bun.sleep(2000)
+      bot.release('dholdlong1', 'dl')
       await bot.until(() => bot.videos().length === 4)
     } finally {
       jobs = await bot.stop()
