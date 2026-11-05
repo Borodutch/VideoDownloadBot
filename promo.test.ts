@@ -1,5 +1,8 @@
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import { arm, bucket, type Config, decide, promos } from './promo'
 
@@ -147,9 +150,9 @@ test('arrivals: /start from another bot\'s campaign reports start, new and use o
   try {
     const db = new Database(':memory:')
     const p = promos(db, { PROMO_TOKEN: 'tok', PROMO_URL: `http://localhost:${server.port}/go/campaigns.json` })
-    p.arrived(42, 'bc1-a-voicy', true)
-    p.arrived(42, 'bc1-a-voicy', false) // an existing chat sends it again: start only
-    p.arrived(42, 'hello', true) // not a campaign
+    p.arrived(42, 'bc1-a-voicy', () => true)
+    p.arrived(42, 'bc1-a-voicy', () => false) // an existing chat sends it again: start only
+    p.arrived(42, 'hello', () => true) // not a campaign
     p.used(42)
     p.used(42) // once a day
     p.used(7) // never arrived
@@ -161,6 +164,86 @@ test('arrivals: /start from another bot\'s campaign reports start, new and use o
     p.used(42) // more than 7 days later
     await p.flush()
     expect(got.length).toBe(4)
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("locks: another process's lock on the database costs a reply its promo, never a throw, and the stats go all the same", async () => {
+  const got: any[] = []
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname
+      if (path === '/go/campaigns.json') return Response.json(cfg())
+      if (path === '/go/events') got.push(...(await req.json()).events)
+      return Response.json({})
+    },
+  })
+  const dir = mkdtempSync(join(tmpdir(), 'promo-'))
+  const file = join(dir, 'bot.sqlite')
+  const other = new Database(file)
+  try {
+    const db = new Database(file)
+    const p = promos(db, { PROMO_TOKEN: 'tok', PROMO_URL: `http://localhost:${server.port}/go/campaigns.json` })
+    await p.refresh()
+    // bot.ts's fresh(): whether the census has the chat (a read)
+    const fresh = () => !!db.query('SELECT 1 FROM arrival LIMIT 1').get()
+    p.arrived(42, 'bc1-a-voicy', () => true)
+    // its writes fail: the promo isn't shown (its cap would go unrecorded),
+    // and the events go without their marks
+    other.run('BEGIN IMMEDIATE')
+    const d = p.decide(inArm('a'), 'private', 'en')!
+    expect(d.promo).toBeUndefined()
+    p.record(d)
+    p.used(42)
+    p.arrived(43, 'bc1-a-voicy', fresh)
+    other.run('ROLLBACK')
+    // so the next reply gets it
+    expect(p.decide(inArm('a'), 'private', 'en')!.promo).toBeDefined()
+    // its reads fail too: a cap that can't be read counts as just shown (the
+    // reply is seen, as in the holdout), the arrival can't be read (no use)
+    // and fresh() counts as not new
+    other.run('BEGIN EXCLUSIVE')
+    const b = p.decide(inArm('b'), 'private', 'en')!
+    expect(b).toMatchObject({ arm: 'b', promo: undefined })
+    p.record(b)
+    p.record(p.decide(inArm(undefined), 'private', 'en'))
+    p.used(42)
+    p.arrived(44, 'bc1-a-voicy', fresh)
+    other.run('ROLLBACK')
+    // an arrival whose fresh() failed is still recorded
+    p.arrived(45, 'bc1-a-voicy', () => {
+      throw new Error('database is locked')
+    })
+    p.used(45)
+    await p.flush()
+    expect(got.map((e) => `${e.c}:${e.v}:${e.k}`)).toEqual([
+      'bc1:a:start',
+      'bc1:a:new',
+      'xp1:a:seen',
+      'bc1:a:use',
+      'bc1:a:start',
+      'bc1:a:new',
+      'xp1:b:seen',
+      'xp1:holdout:seen',
+      'bc1:a:start',
+      'bc1:a:start',
+      'bc1:a:use',
+    ])
+  } finally {
+    other.close()
+    server.stop(true)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('promos: a campaigns.json decide() can\'t read means no promo, never a throw', async () => {
+  const server = Bun.serve({ port: 0, fetch: () => Response.json({ ...cfg(), campaigns: {} }) })
+  try {
+    const p = promos(new Database(':memory:'), { PROMO_TOKEN: 'tok', PROMO_URL: `http://localhost:${server.port}/go/campaigns.json` })
+    await p.refresh()
+    expect(p.decide(inArm('a'), 'private', 'en')).toBeNull()
   } finally {
     server.stop(true)
   }

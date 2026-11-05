@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { t } from './i18n'
+import { arm, type Campaign } from './promo'
 
 // The real bot, polling a fake Bot API, with test/yt-dlp standing in for
 // yt-dlp: a link with "long" in it is a 50-minute video that downloads in
@@ -255,6 +256,20 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
             ? { text: `@${me.username}`, entities: [], reply_to_message: { ...copy, chat: m.chat, from: m.from } }
             : copy),
           guest_query_id: `q${user}`,
+        },
+      } as { update_id: number })
+    },
+    // a command ("/start <payload>") from user in a private chat
+    command(user: number, text: string) {
+      updates.push({
+        update_id: updates.length + 1,
+        message: {
+          message_id: ++id,
+          date: 0,
+          text,
+          entities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }],
+          chat: { id: user, type: 'private', first_name: 'u' },
+          from: { id: user, is_bot: false, first_name: 'u', language_code: 'en' },
         },
       } as { update_id: number })
     },
@@ -1781,6 +1796,117 @@ test.skipIf(skip)(
     }
     expect(bot.statuses(1).map((s) => s[0])).toEqual(['⏬', '⏫'])
     expect(jobs.filter((l) => l.startsWith('job ok '))).toHaveLength(1)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: with promos on, another process's lock on the database costs neither a link handed a promo its video nor a /start from a campaign its help, and the bot keeps running",
+  async () => {
+    // Promo's stats (promo.ts) meet the lock. Held for writes (BEGIN
+    // IMMEDIATE): the cap of the promo handed to b's link (decide(), before
+    // handle()'s try: unhandled, the throw ended the bot), then the day's
+    // seen and the arrival's use once that video is out (the chat heard it
+    // failed). Held for reads too (BEGIN EXCLUSIVE, as during another
+    // process's commit): c's /start, whose new-chat read and arrival failed
+    // (the arrival cost the help, the read the start event). The test serves
+    // the campaign at PROMO_URL; a, b and c are in its variant.
+    const campaign: Campaign = {
+      id: 'xp1',
+      bot: 'videodownloadbot',
+      status: 'running',
+      target: 'https://t.me/voicybot',
+      chats: ['private'],
+      cap_days: 7,
+      langs: ['en'],
+      text: { en: 'Voice to text' },
+      variants: [{ id: 'a', share: 0.9, format: 'caption' }],
+    }
+    const [a, b, c] = Array.from({ length: 50 }, (_, i) => 10 + i).filter((u) => arm(campaign, u)) as [number, number, number]
+    let fetched = false
+    const events: { c: string; v: string; k: string }[] = []
+    const lumen = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname
+        if (path === '/go/events') events.push(...(await req.json()).events)
+        if (path !== '/go/campaigns.json') return Response.json({})
+        fetched = true
+        return Response.json({
+          base: 'https://lumen.example/go',
+          bots: { videodownloadbot: { enabled: true, code: 'vdb' } },
+          campaigns: [campaign],
+        })
+      },
+    })
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = new Database(join(data, 'bot.sqlite'))
+    // the test's own reads and its lock wait for the bot's writes
+    db.run('PRAGMA busy_timeout = 10000')
+    const bot = start({
+      DATA_DIR: data,
+      PROMO_TOKEN: 'tok',
+      PROMO_URL: `http://127.0.0.1:${lumen.port}/go/campaigns.json`,
+    })
+    const help = t('en', 'help')
+    let jobs: string[] = []
+    let up = false
+    try {
+      await bot.until(() => fetched)
+      // a's video goes out with the promo, and is cached
+      bot.link(a, 'short1')
+      await bot.until(() => bot.calls.some((call) => call.chat === a && call.method === 'deleteMessage'))
+      // b comes from another bot's campaign
+      bot.command(b, '/start bc1-b-voicy')
+      await bot.until(() => bot.statuses(b).includes(help) && !!db.query('SELECT 1 FROM arrival WHERE user = ?').get(b))
+      // c comes from it too, the database locked for reads. The lock goes
+      // once c's help is in: arrived() runs in the same synchronous handler
+      // right after help(ctx) starts that request, so it has nearly always
+      // run by then (c's census write met the lock, so c's chat isn't new
+      // either way)
+      db.run('BEGIN EXCLUSIVE')
+      bot.command(c, '/start bc1-b-voicy')
+      await bot.until(() => bot.statuses(c).includes(help))
+      db.run('ROLLBACK')
+      // b's link, from the cache, the database locked for writes
+      db.run('BEGIN IMMEDIATE')
+      bot.link(b, 'short1')
+      await bot.until(() => bot.videos().length === 2)
+      up = bot.running()
+    } finally {
+      // with the lock still held: the drain waits for b's request, then
+      // sends the stats
+      jobs = await bot.stop()
+      if (db.inTransaction) db.run('ROLLBACK')
+      db.close()
+      lumen.stop(true)
+      rmSync(data, { recursive: true, force: true })
+    }
+    expect(up).toBe(true)
+    // a promo whose cap can't be recorded isn't shown, as if capped (chats,
+    // flags and whether the caption has it: a failing toEqual on the calls
+    // would print an upload's every byte)
+    expect(bot.videos().map((v) => [v.chat, v.upload, v.caption!.includes('Voice to text')])).toEqual([
+      [a, true, true],
+      [b, false, false],
+    ])
+    // nobody heard it failed, and both /starts got the help
+    expect(bot.statuses(a).map((s) => s[0])).toEqual(['⏬', '⏫'])
+    expect(bot.statuses(b)).toEqual([help])
+    expect(bot.statuses(c)).toEqual([help])
+    // the stats went all the same: seen for a and b, shown for a's promo
+    // only, b's use, both /starts (and new for b's, whose chat was new; c's
+    // new-chat read failed)
+    expect(events.map((e) => `${e.c}:${e.v}:${e.k}`).sort()).toEqual([
+      'bc1:b:new',
+      'bc1:b:start',
+      'bc1:b:start',
+      'bc1:b:use',
+      'xp1:a:seen',
+      'xp1:a:seen',
+      'xp1:a:shown',
+    ])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok'])
   },
   30_000,
 )

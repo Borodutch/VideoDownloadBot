@@ -15,6 +15,10 @@ import { lang } from './i18n'
 // Off when: PROMO=off, no PROMO_TOKEN (nothing would be measured), the config
 // says so (bots.videodownloadbot.enabled, a campaign's status), or the config
 // couldn't be read for an hour.
+// Once the bot is up, a statement that meets another process's lock on the
+// database throws at once (busy_timeout 0, bot.ts): a deploy's old container
+// may be writing. Promo's reads and writes only log that, so a promo stat
+// never fails a reply or ends the bot.
 
 export const BOT = 'videodownloadbot'
 const STALE = 3600_000
@@ -144,6 +148,16 @@ export function promos(db: Database, env = process.env) {
     db
       .query(`INSERT INTO promo (campaign, unit, ${col}) VALUES (?, ?, ?) ON CONFLICT (campaign, unit) DO UPDATE SET ${col} = excluded.${col}`)
       .run(campaign, unit, value)
+  // f(), or otherwise when it throws (another process's lock, see above),
+  // logged as what
+  const safely = <T>(what: string, f: () => T, otherwise: T) => {
+    try {
+      return f()
+    } catch (e) {
+      console.error(`promo ${what}`, (e as Error).message)
+      return otherwise
+    }
+  }
 
   const off = env.PROMO === 'off'
   const salt = env.PROMO_TOKEN || ''
@@ -190,21 +204,29 @@ export function promos(db: Database, env = process.env) {
     flush,
     // The promo for a reply about to go out. A promo counts against the cap
     // as soon as it's handed out, so several links in one message get one.
+    // A cap that can't be read counts as just shown, and a promo whose cap
+    // can't be recorded isn't shown: none comes back before cap_days are
+    // over, and the reply still counts as seen, as a capped one does.
     // ponytail: a failed download still uses up the user's promo for cap_days
     decide(user: number, chat: string, code: string | undefined) {
       const fresh = Date.now() - fetched < STALE ? cfg : undefined
-      const d = decide(fresh, salt, user, chat, code, (c, u) => row.get(c, u)?.shown ?? undefined)
-      if (d?.promo) upsert('shown', d.campaign, d.unit, Date.now())
+      const last = (c: string, u: string) => safely('cap', () => row.get(c, u)?.shown ?? undefined, Date.now())
+      // a campaigns.json decide() can't read means no promo either
+      const d = safely('config', () => decide(fresh, salt, user, chat, code, last), null)
+      if (d?.promo && !safely('cap', () => !!upsert('shown', d.campaign, d.unit, Date.now()), false))
+        return { ...d, promo: undefined }
       return d
     },
-    // After the reply went out: seen once a day per user, shown each time
+    // After the reply went out: seen once a day per user, shown each time. A
+    // day's mark that can't be read or written sends seen all the same: the
+    // numbers count distinct people a day (Prime Radiant's bin/xp.py).
     record(d: Decision | null) {
       if (!d) return
       const t = Math.floor(Date.now() / 1000)
       const day = new Date().toISOString().slice(0, 10)
       const base = { c: d.campaign, v: d.arm, u: d.unit, t }
-      if (row.get(d.campaign, d.unit)?.seen !== day) {
-        upsert('seen', d.campaign, d.unit, day)
+      if (safely('seen', () => row.get(d.campaign, d.unit)?.seen, undefined) !== day) {
+        safely('seen', () => void upsert('seen', d.campaign, d.unit, day), undefined)
         queue.push({ ...base, k: 'seen' })
       }
       if (d.promo) queue.push({ ...base, k: 'shown' })
@@ -221,22 +243,26 @@ export function promos(db: Database, env = process.env) {
         queue.push({ c: c.id, v: arm(c, user)?.id ?? 'holdout', k: 'blocked', u: sha(`${salt}:${c.id}:${user}`).slice(0, 16), t })
     },
     // Another bot's campaign brought this user (/start <payload>): start each
-    // time (the numbers count distinct people), new when the chat is new here.
-    // Same salted hash as the other bots, so the experiment can join them.
-    arrived(user: number, payload: string | undefined, fresh: boolean) {
+    // time (the numbers count distinct people), new when the chat is new here
+    // (fresh(), a read that's only made then; one that fails counts as not
+    // new). Same salted hash as the other bots, so the experiment can join
+    // them. An arrival that can't be recorded gets no use events.
+    arrived(user: number, payload: string | undefined, fresh: () => boolean) {
       const m = ARRIVAL.exec(payload || '')
       if (!m || !salt) return
       const base = { c: m[1]!, v: m[2]!, u: sha(`${salt}:${m[1]}:${user}`).slice(0, 16), t: Math.floor(Date.now() / 1000) }
       queue.push({ ...base, k: 'start' })
-      if (fresh) queue.push({ ...base, k: 'new' })
-      db.query('INSERT OR IGNORE INTO arrival VALUES (?, ?, ?, NULL)').run(user, payload!, Date.now())
+      if (safely('arrival', fresh, false)) queue.push({ ...base, k: 'new' })
+      safely('arrival', () => void db.query('INSERT OR IGNORE INTO arrival VALUES (?, ?, ?, NULL)').run(user, payload!, Date.now()), undefined)
     },
-    // A download in the 7 days after the arrival: use, once a day
+    // A download in the 7 days after the arrival: use, once a day (a day's
+    // mark that can't be written sends it all the same, as seen; nothing goes
+    // when the arrival can't be read)
     used(user: number) {
-      const a = arrival.get(user)
+      const a = safely('use', () => arrival.get(user), null)
       const day = new Date().toISOString().slice(0, 10)
       if (!a || !salt || Date.now() - a.at > WEEK || a.used === day) return
-      db.query('UPDATE arrival SET used = ? WHERE user = ?').run(day, user)
+      safely('use', () => void db.query('UPDATE arrival SET used = ? WHERE user = ?').run(day, user), undefined)
       const [, c, v] = ARRIVAL.exec(a.payload)!
       queue.push({ c: c!, v: v!, k: 'use', u: sha(`${salt}:${c}:${user}`).slice(0, 16), t: Math.floor(Date.now() / 1000) })
     },

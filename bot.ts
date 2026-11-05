@@ -1634,20 +1634,23 @@ function main() {
   })
   const created = db.query<{ created: number }, [number]>('SELECT created FROM chats WHERE id = ?')
   bot.command(['start', 'help'], (ctx) => {
+    // first: nothing the stats below run into can cost the help
+    help(ctx)
     // a /start from another bot's campaign link (promo.ts); the census above has just added a new chat
     if (ctx.chat.type === 'private' && ctx.from && ctx.match)
-      promo.arrived(ctx.from.id, ctx.match, Date.now() / 1000 - (created.get(ctx.chat.id)?.created ?? 0) < 600)
-    help(ctx)
+      promo.arrived(ctx.from.id, ctx.match, () => Date.now() / 1000 - (created.get(ctx.chat.id)?.created ?? 0) < 600)
   })
   bot.on('message', (ctx) => {
     const me = { ...ctx.me, mine }
     // its own videos forwarded or copied to it get no answer, not even the help
     if (own(ctx.msg, me)) return
     const found = links(ctx.msg, me)
-    // handlers run detached so one long download doesn't block the next update
+    // handlers run detached so one long download doesn't block the next update;
+    // a throw that gets past handle()'s own catch is logged, as unhandled it
+    // would end the bot
     void track(
       requested(ctx.msg, me, ctx.chat.type)
-        .then((wanted) => wanted.forEach((url) => void track(handle(ctx, url))))
+        .then((wanted) => wanted.forEach((url) => void track(handle(ctx, url).catch(console.error))))
         .catch(console.error),
     )
     if (!found.length && ctx.chat.type === 'private') help(ctx)
