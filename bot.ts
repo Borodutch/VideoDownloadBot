@@ -1009,23 +1009,40 @@ function main() {
   db.run(
     'CREATE TABLE IF NOT EXISTS files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)',
   )
-  const get = db.query<File, [string]>('SELECT * FROM files WHERE key = ?')
+  // The cache's statements, like sent's below: past the start, one that meets
+  // another process's lock on the file fails at once (a deploy's old
+  // container writes files, sized and sent as its last jobs finish). It's
+  // logged and comes to undefined, which costs a request at most a download:
+  // a read that fails is a miss, and a write that fails once the file is out
+  // leaves the chat its file.
+  const cache = <T>(what: string, statement: () => T) => {
+    try {
+      return statement()
+    } catch (e) {
+      console.error('cache', what, (e as Error).message)
+    }
+  }
+  const row = db.query<File, [string]>('SELECT * FROM files WHERE key = ?')
+  const get = (key: string) => cache('get', () => row.get(key))
   const put = (key: string, f: File) =>
-    db
-      .query('INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?)')
-      .run(key, f.kind, f.file_id, f.title, f.url)
+    cache('put', () =>
+      db.query('INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?)').run(key, f.kind, f.file_id, f.title, f.url),
+    )
   // file_ids uploaded with the file's own size (#281), or whose one refresh
   // was tried; older videos may have gone out without a size. A table of its
   // own: a container still running the old code keeps writing files.
   db.run('CREATE TABLE IF NOT EXISTS sized (file_id TEXT PRIMARY KEY)')
-  // true the first time only
+  // true the first time only (not when it can't be written: the refresh
+  // waits for another time)
   const settle = (fileId: string) =>
-    db.query('INSERT OR IGNORE INTO sized VALUES (?)').run(fileId).changes > 0
+    cache('settle', () => db.query('INSERT OR IGNORE INTO sized VALUES (?)').run(fileId).changes > 0)
   // every link cached with the old file gets the new one
   const swap = (old: string, f: File) =>
-    db.query('UPDATE files SET kind = ?, file_id = ? WHERE file_id = ?').run(f.kind, f.file_id, old)
+    cache('swap', () =>
+      db.query('UPDATE files SET kind = ?, file_id = ? WHERE file_id = ?').run(f.kind, f.file_id, old),
+    )
   const forget = (f: File) =>
-    db.query('DELETE FROM files WHERE file_id = ?').run(f.file_id)
+    cache('forget', () => db.query('DELETE FROM files WHERE file_id = ?').run(f.file_id))
   // The files it has sent, by file_unique_id: a copy of one is its own
   // message (own()). A video cached before this table joins it the next time
   // it goes out; until then a copy of it counts as anyone's. A table of its
@@ -1207,7 +1224,7 @@ function main() {
       // job while this one waits; a refresh wants a new upload, not another
       // cached copy
       const fromCache = async (key: string) => {
-        const hit = get.get(key)
+        const hit = get(key)
         if (hit && !dest.stale && (await resend(dest, hit))) {
           put(url, hit)
           return hit
@@ -1221,11 +1238,12 @@ function main() {
       // every key cached with it (swap), so it has to be the video whose key
       // has that copy: the page may lead to another one now, at the first
       // read or when read again (a multi-video post whose first one has
-      // changed), and the old copy stays.
+      // changed), and the old copy stays, as it does when the key can't be
+      // read.
       const vet = async (pick: any) => {
         const stream = unready(pick)
         if (stream) throw new Fail(stream, `${stream} stream`)
-        if (dest.stale && get.get(cacheKey(pick))?.file_id !== dest.stale.file_id)
+        if (dest.stale && get(cacheKey(pick))?.file_id !== dest.stale.file_id)
           throw new Fail(null, 'another video')
         const hit = await fromCache(cacheKey(pick))
         if (hit) return hit
@@ -1409,7 +1427,7 @@ function main() {
     url: string,
     status: (key: Key, follow?: boolean) => Promise<void>,
   ): Promise<File> {
-    const cached = get.get(url)
+    const cached = get(url)
     if (cached && (await resend(dest, cached, (message) => (dest.stale = { message, file_id: cached.file_id }))))
       return dest.stale ? refresh(dest, url, cached) : cached
     const job = jobs.get(url)

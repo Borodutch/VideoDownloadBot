@@ -90,9 +90,12 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       else if (ms) await Bun.sleep(ms)
       if (method === 'answerGuestQuery') return ok({ inline_message_id: `g${++id}` })
       if (method === 'sendMessage') return ok({ message_id: ++id, date: 0, chat, text: body.text })
-      // cached file_ids "unsized…" went out without a size, as before #281;
-      // unique = the file_unique_id the video went out with
+      // cached file_ids "unsized…" went out without a size, as before #281,
+      // and "dead…" ones are gone from Telegram's servers; unique = the
+      // file_unique_id the video went out with
       if (method === 'sendVideo') {
+        if (String(body.video).startsWith('dead'))
+          return Response.json({ ok: false, error_code: 400, description: 'Bad Request: wrong file identifier/HTTP URL specified' })
         call.unique = `u${++id}`
         return ok({
           message_id: id,
@@ -1193,6 +1196,225 @@ test.skipIf(skip)(
     expect(bot.inline().map((s) => [...s][0])).toEqual(['⏬', '⏫', '🔄'])
     expect(bot.videos()).toHaveLength(0)
     expect(jobs.filter((l) => /^job fail:restarting .* dl=/.test(l))).toHaveLength(1)
+  },
+  30_000,
+)
+
+// The cache's statements meet another process's lock on bot.sqlite (a
+// deploy's old container finishing its jobs) and fail at once: past the
+// start busy_timeout is 0. The tests below hold the lock from the test
+// process, BEGIN IMMEDIATE for the write lock and BEGIN EXCLUSIVE for the one
+// a commit takes, which keeps readers out too, and take it once the bot is up
+// (its start would wait for it, then stop). Each keeps it while the bot's
+// drain lets the handlers finish. locked() opens the database with seed in
+// the cache, each row a key, its file_id and the video's link; its own lock
+// waits for the bot's writes.
+function locked(data: string, seed: [key: string, file: string, url: string][] = []) {
+  const db = new Database(join(data, 'bot.sqlite'))
+  db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+  for (const row of seed) db.run("INSERT INTO files VALUES (?1, 'video', ?2, 'Video', ?3)", row)
+  db.run('PRAGMA busy_timeout = 10000')
+  return db
+}
+
+test.skipIf(skip)(
+  "bot: another process holding the database's write lock as a job uploads costs neither its chat nor a request following the job the video",
+  async () => {
+    // The job's cache writes once its file is out (settle, put) meet the
+    // lock: each is logged, and the job still returns its file. Thrown, they
+    // failed the job: its chat heard so next to its video, and the request
+    // following it got none.
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = locked(data)
+    const bot = start({ DATA_DIR: data })
+    // a request is over once its status is gone, or says it failed
+    const over = (chat: number) =>
+      bot.calls.some((c) => c.chat === chat && c.method === 'deleteMessage') ||
+      bot.statuses(chat).includes(t('en', 'failed'))
+    let jobs: string[] = []
+    let rows = -1
+    try {
+      // the download is held, and another request follows its job
+      bot.link(1, 'dholdshort1')
+      await bot.until(() => bot.held('dholdshort1', 'dl'))
+      bot.link(2, 'dholdshort1')
+      await bot.until(() => bot.statuses(2).length > 0)
+      db.run('BEGIN IMMEDIATE')
+      bot.release('dholdshort1', 'dl')
+      await bot.until(() => over(1) && over(2))
+    } finally {
+      bot.release('dholdshort1', 'dl')
+      jobs = await bot.stop()
+      if (db.inTransaction) db.run('ROLLBACK')
+      rows = db.query<{ n: number }, []>('SELECT (SELECT count(*) FROM files) + (SELECT count(*) FROM sized) AS n').get()!.n
+      db.close()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // the job's upload and the follower's copy of it, and neither chat heard
+    // it failed (chats and flags only: a failing toEqual on the calls would
+    // print an upload's every byte)
+    expect(bot.videos().map((v) => [v.chat, v.upload])).toEqual([
+      [1, true],
+      [2, false],
+    ])
+    for (const chat of [1, 2]) expect(bot.statuses(chat).map((s) => [...s][0])).toEqual(['⏬', '⏫'])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok'])
+    // every write met the lock: nothing is cached, nor sized
+    expect(rows).toBe(0)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: another process holding the database's write lock costs no cached link its video: one sent without a size, another link to one, one whose file_id is dead",
+  async () => {
+    // short1's copy went out before videos had their size (#281), and the
+    // fake Bot API resends it without one: its one refresh is recorded
+    // (settle). short2 is cached under its id alone: a link to it that isn't
+    // cached goes out from there, and is cached under that link (put).
+    // short3's file_id is gone from Telegram: it's forgotten (forget), and
+    // the link downloaded again. Each write meets the lock: it's logged, the
+    // refresh waits for another time and the rows stay as they were. Thrown,
+    // each failed its request: short1's and short2's next to their video,
+    // short3's without one.
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    const db = locked(data, [
+      [link('short1'), 'unsized1', link('short1')],
+      ['Youtube:short2', 'cached2', link('short2')],
+      [link('short3'), 'dead3', link('short3')],
+    ])
+    const bot = start({ DATA_DIR: data })
+    const over = (chat: number) =>
+      bot.calls.some((c) => c.chat === chat && c.method === 'deleteMessage') ||
+      bot.statuses(chat).includes(t('en', 'failed'))
+    const sent = (chat: number) => bot.videos().filter((v) => v.chat === chat).map((v) => v.upload)
+    let jobs: string[] = []
+    let cached: Record<string, string> = {}
+    let sized: string[] = []
+    try {
+      // up, and done writing: a first link's video is out
+      bot.link(9, 'short9')
+      await bot.until(() => over(9))
+      db.run('BEGIN IMMEDIATE')
+      bot.link(1, 'short1')
+      bot.link(2, 'short2&t=1')
+      bot.link(3, 'short3')
+      await bot.until(() => sent(1).length === 1 && sent(2).length === 1 && over(3))
+    } finally {
+      // whatever a request was going to say is in once the drain is over
+      jobs = await bot.stop()
+      if (db.inTransaction) db.run('ROLLBACK')
+      const rows = db.query<{ key: string; file_id: string }, []>('SELECT key, file_id FROM files').all()
+      cached = Object.fromEntries(rows.map((r) => [r.key, r.file_id]))
+      sized = db.query<{ file_id: string }, []>('SELECT file_id FROM sized').all().map((r) => r.file_id)
+      db.close()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // short1 and short2 from the cache, short3 downloaded again after its
+    // dead file_id's try, and none heard it failed (the first two show no
+    // status at all)
+    expect([sent(1), sent(2), sent(3)]).toEqual([[false], [false], [false, true]])
+    expect([bot.statuses(1), bot.statuses(2)]).toEqual([[], []])
+    expect(bot.statuses(3).map((s) => [...s][0])).toEqual(['⏬', '⏫'])
+    // short1 isn't refreshed: the jobs are short9's, short2's (from the
+    // cache) and short3's
+    expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['cached', 'ok', 'ok'])
+    // and the writes met the lock: short1 isn't sized, short2's link isn't
+    // cached and short3's dead row is still there
+    expect(sized).not.toContain('unsized1')
+    expect(cached[link('short2&t=1')]).toBeUndefined()
+    expect(cached[link('short3')]).toBe('dead3')
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a refresh of an unsized video that uploads while another process holds the database's write lock still takes the old copy's place",
+  async () => {
+    // short1's copy went out before videos had their size, and its refresh's
+    // download is held until the lock is taken: the writes once the new copy
+    // is out (settle, put, then swap) meet the lock and are logged, and the
+    // old copy's message goes. Thrown, they failed the refresh: the chat kept
+    // both copies.
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    const db = locked(data, [
+      [link('dholdshort1'), 'unsized1', link('dholdshort1')],
+      ['Youtube:dholdshort1', 'unsized1', link('dholdshort1')],
+    ])
+    const bot = start({ DATA_DIR: data })
+    let jobs: string[] = []
+    let cached: string[] = []
+    try {
+      bot.link(1, 'dholdshort1')
+      await bot.until(() => bot.held('dholdshort1', 'dl'))
+      db.run('BEGIN IMMEDIATE')
+      bot.release('dholdshort1', 'dl')
+      await bot.until(() => bot.calls.some((c) => c.method === 'deleteMessage'))
+    } finally {
+      bot.release('dholdshort1', 'dl')
+      jobs = await bot.stop()
+      if (db.inTransaction) db.run('ROLLBACK')
+      cached = db.query<{ file_id: string }, []>('SELECT file_id FROM files').all().map((r) => r.file_id)
+      db.close()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // the old copy, then the new one, and the old one's message deleted
+    expect(bot.videos().map((v) => [v.chat, v.upload])).toEqual([
+      [1, false],
+      [1, true],
+    ])
+    expect(bot.calls.filter((c) => c.method === 'deleteMessage').map((c) => c.chat)).toEqual([1])
+    expect(bot.statuses(1)).toEqual([])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok'])
+    // every link keeps the old copy: the new one couldn't be written
+    expect(cached).toEqual(['unsized1', 'unsized1'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: a cached link whose row can't be read while another process commits is downloaded again, not failed",
+  async () => {
+    // A commit holds the lock that keeps readers out (BEGIN EXCLUSIVE here
+    // holds it all along): every read of the cache fails at once, and is a
+    // miss. Thrown, the first one failed the request before anything went
+    // out, here a guest reply's, whose video is uploaded to the storage chat
+    // and edited into the reply.
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    const db = locked(data, [
+      [link('short1'), 'cached1', link('short1')],
+      ['Youtube:short1', 'cached1', link('short1')],
+    ])
+    const bot = start({ DATA_DIR: data, STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    try {
+      // up, and done writing: a first link's video is out
+      bot.link(8, 'short8')
+      await bot.until(() => bot.calls.some((c) => c.chat === 8 && c.method === 'deleteMessage'))
+      db.run('BEGIN EXCLUSIVE')
+      bot.guest(1, 'short1')
+      // its video is edited into the guest reply, or the reply says it failed
+      await bot.until(
+        () => bot.calls.some((c) => c.method === 'editMessageMedia') || bot.inline().includes(t('en', 'failed')),
+      )
+    } finally {
+      jobs = await bot.stop()
+      if (db.inTransaction) db.run('ROLLBACK')
+      db.close()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // uploaded to the storage chat again rather than sent from the cache,
+    // and edited into the reply after the usual statuses
+    expect(bot.videos().map((v) => [v.chat, v.upload])).toEqual([
+      [8, true],
+      [9, true],
+    ])
+    expect(bot.calls.filter((c) => c.method === 'editMessageMedia')).toHaveLength(1)
+    expect(bot.inline().map((s) => [...s][0])).toEqual(['⏬', '⏫'])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok', 'ok'])
   },
   30_000,
 )
