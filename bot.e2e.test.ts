@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite'
 import { afterAll, expect, test } from 'bun:test'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -58,6 +59,10 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
   // updates first (until())
   let offset = 0
   let up: number | undefined
+  // the test's timeout, and when until() gives up at the latest (e2e())
+  const clock = clocks.getStore()
+  if (!clock) throw new Error('start() is for e2e() tests')
+  const end = clock.begun + clock.timeout - STOP_MS
   const me = { id: 1, is_bot: true, first_name: 'Vid', username: 'VidBot' }
   const api = Bun.serve({
     port: 0,
@@ -340,11 +345,13 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     // the bot's first getUpdates at the earliest: on a busy runner its start
     // alone (Bun's, the fake yt-dlp's self-update, getMe) has taken over 15
     // s, which is no wait's. Whatever the start took, though, a wait is over
-    // 25 s in at most (or ms, when that's longer), so that it fails before
-    // its test's 30 s run out and loses this report. One that runs out fails
-    // with where it was (its lines in this file, the test's last), what it
-    // waited for, the bot's last stderr and stdout lines and its last Bot API
-    // calls (getMe and getUpdates aside)
+    // 25 s in at most (or ms, when that's longer). And none goes on past its
+    // test's timeout less STOP_MS (one that begins later gives up at once),
+    // however long the waits before it took: so one that runs out fails
+    // before its test times out, which would lose this report. It fails with
+    // where it was (its lines in this file, the test's last), what it waited
+    // for, the bot's last stderr and stdout lines and its last Bot API calls
+    // (getMe and getUpdates aside)
     async until(done: () => boolean, ms = 15_000) {
       // the callers' frames, taken before an await drops them
       const at = (new Error().stack ?? '')
@@ -356,20 +363,24 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       while (!done()) {
         const now = performance.now()
         const waited = now - begun
-        if ((up !== undefined && now - Math.max(begun, up) >= ms) || waited >= Math.max(ms, 25_000)) {
+        const over = (up !== undefined && now - Math.max(begun, up) >= ms) || waited >= Math.max(ms, 25_000)
+        if (over || now >= end) {
           const tail = (what: string, of: string[]) =>
             `${what}, last ${Math.min(of.length, 30)} of ${of.length}:\n${of.slice(-30).join('\n') || '(none)'}`
           // (a call with no chat_id, as deleteWebhook, has chat NaN)
           const made = calls.map(
             (c) => `${c.method} ${Number.isNaN(c.chat) ? '-' : c.chat}${c.text ? ` ${JSON.stringify(c.text.slice(0, 60))}` : ''}`,
           )
-          // (a bot that came up only during the wait: when)
+          // (a bot that came up only during the wait: when; a wait its test's
+          // timeout cut short: how long before that timeout it gave up)
           const late =
             up === undefined ? ', the bot not up yet' : up > begun ? `, the bot up ${((up - begun) / 1000).toFixed(1)} s in` : ''
+          const left = (clock.begun + clock.timeout - now) / 1000
+          const cut = over ? '' : `, ${left.toFixed(1)} s before its test's ${clock.timeout / 1000} s timeout`
           failed = true
           throw new Error(
             [
-              `until() at bot.e2e.test.ts:${at.join(' < ') || '?'} not done after ${(waited / 1000).toFixed(1)} s${late}: ${done}`,
+              `until() at bot.e2e.test.ts:${at.join(' < ') || '?'} not done after ${(waited / 1000).toFixed(1)} s${late}${cut}: ${done}`,
               tail('bot stderr lines', errors),
               tail('bot stdout lines', lines),
               tail('Bot API calls', made),
@@ -439,6 +450,22 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
 
 const skip = !Bun.which('ffmpeg') && !process.env.CI
 
+// What stop() may take after an until() that ran out (the bot's SIGKILL, its
+// end and the fake Bot API's), with room to spare: until() gives up that long
+// before its test's timeout. Past the timeout Bun says only that the test
+// timed out, and the until()'s error, if it comes out at all, is an
+// "Unhandled error between tests" that names no test
+const STOP_MS = 3_000
+// Each running e2e test's timeout and when it began (performance.now()),
+// which start() takes: Bun counts a test's timeout from when it calls the
+// test's function, and concurrent tests each keep their own store
+const clocks = new AsyncLocalStorage<{ begun: number; timeout: number }>()
+// An e2e test (start() runs only in one) of timeout ms, skipped without
+// ffmpeg outside CI
+function e2e(title: string, fn: () => Promise<void>, timeout: number) {
+  test.skipIf(skip)(title, () => clocks.run({ begun: performance.now(), timeout }, fn), timeout)
+}
+
 // A fake Bot API answer that waits until the test opens it
 function gate() {
   let open = () => {}
@@ -465,7 +492,7 @@ function alive(pid: number) {
   }
 }
 
-test.skipIf(skip)(
+e2e(
   'bot: a short link goes out while long ones download, and a queued one says so',
   async () => {
     const bot = start()
@@ -514,12 +541,12 @@ test.skipIf(skip)(
     expect(jobs.some((l) => /lane=long ahead=0 own=1 dur=3000 wait=([2-9]|\d{2,})\./.test(l))).toBe(true)
   },
   // its five waits and its 2 s pause come one after another, and under load
-  // the last wait has begun almost 15 s in: a timeout of it must still end,
-  // with its report, before the test's own timeout does
+  // the last wait has begun almost 15 s in: the timeout leaves it its whole
+  // 15 s (until() gives up STOP_MS before the timeout)
   45_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: an Instagram reel, which doesn't say how long it is, goes out while three long videos download; a stream that doesn't waits",
   async () => {
     // four slots, three for long videos
@@ -555,12 +582,13 @@ test.skipIf(skip)(
   },
   // its three waits and its 2 s pause come one after another, 57 s at most
   // by their budgets (the first wait's is 25 s: until() counts its 15 s
-  // from when the bot is up): a timeout of the last must still end, with
-  // its report, before the test's own timeout does
-  60_000,
+  // from when the bot is up): the timeout leaves each wait its whole budget,
+  // with 2 s for the steps between them (until() gives up STOP_MS before
+  // the timeout)
+  62_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: by default eight slots, seven for long videos, one user's long ones six; the job line counts the user's own jobs that have a slot or wait for one",
   async () => {
     // An empty MAX_DOWNLOADS is read as unset, so this runs the default;
@@ -610,7 +638,7 @@ test.skipIf(skip)(
   60_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a request for a link still in yt-dlp -J hears that it is queued when the job is',
   async () => {
     const bot = start()
@@ -652,7 +680,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a request for a link that is already downloading hears so, then that it is uploading',
   async () => {
     const bot = start()
@@ -677,7 +705,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: its own video forwarded into a group it's in, or to itself, gets no answer",
   async () => {
     const bot = start()
@@ -700,7 +728,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply to its video or the video forwarded gets no answer, a mention in reply the help; without a storage chat, a plain reply with a video's link gets none either, a mention with one the failure",
   async () => {
     // (no STORAGE_CHAT or ADMIN_ID: guest downloads fail)
@@ -735,7 +763,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply to its video is only answered once its own link has a video, a mention at once",
   async () => {
     const bot = start({ STORAGE_CHAT: '9' })
@@ -827,7 +855,7 @@ test.skipIf(skip)(
   80_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply whose link still waits for -J when the answer can't wait any longer is answered then",
   async () => {
     // (each plain reply's answer waits until the test says its time is up:
@@ -909,7 +937,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply whose page has no video stays unanswered past the time its answer could wait",
   async () => {
     const bot = start({ STORAGE_CHAT: '9' })
@@ -941,7 +969,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply is answered at once when the bot has its video or its time is up already, and gets no job when that answer comes too late",
   async () => {
     // old20 has a copy cached under its link and id from before videos went
@@ -994,7 +1022,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, a guest reply that doesn't mention the bot and has no answer yet gets none when its time runs out in the drain",
   async () => {
     // The drain alone, not DEPLOY's cut at once: the cut is 598 s away, so
@@ -1021,7 +1049,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, a guest reply that doesn't mention the bot and whose time ran out while its link was checked isn't answered at once once the drain has begun",
   async () => {
     // the drain alone, as above
@@ -1055,7 +1083,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, a guest reply that doesn't mention the bot and has no answer yet gets none when its -J finds a video after the cut",
   async () => {
     const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' })
@@ -1082,7 +1110,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, before the cut, a guest reply that doesn't mention the bot is answered once its -J finds a short video, and gets it",
   async () => {
     // The drain alone: the cut is 598 s away, so the download can still be
@@ -1103,7 +1131,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, past the cut, a guest reply that doesn't mention the bot whose -J finds a video cached under its id is answered and gets it",
   async () => {
     const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' })
@@ -1132,7 +1160,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, the time a plain reply's answer may wait counts from when it was sent",
   async () => {
     // the bot's own timer, GUEST_WAIT_MS's default of 30 s
@@ -1169,7 +1197,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply whose answer Telegram no longer takes when the download begins still gets its job done, and the bot goes on",
   async () => {
     // Sent 62 s ago, while its answer may still wait (GUEST_WAIT_MS): the
@@ -1196,7 +1224,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply's job goes on to its upload while its answer is still on its way, as in a flood wait",
   async () => {
     // the answer waits until the test lets it go
@@ -1219,7 +1247,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: in a chat it isn't in, a plain reply that comes while another process holds the database's lock is answered once its video is found, as any other",
   async () => {
     const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
@@ -1250,7 +1278,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a copy of its own video (forwarded with the sender hidden) gets no answer in a group, in private or where it is a guest, nor does a mention in reply to it take its link',
   async () => {
     // short7 was cached before the bot kept the files it sends: its file
@@ -1307,7 +1335,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a sent table that fails every write and read lets a copy of its video through as a request, and serves links and users' own uploads as usual",
   async () => {
     // sent as a view without a file column: the bot's CREATE TABLE IF NOT
@@ -1354,7 +1382,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a deploy's handover holding the database's write lock holds up its start rather than ending it",
   async () => {
     // the old container, still polling, has the write lock as the new one
@@ -1391,7 +1419,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: once it's up, another process holding the database's write lock holds up none of its answers",
   async () => {
     // Past the tables set up at start, a statement that meets the lock fails
@@ -1453,7 +1481,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, jobs still running near the exit tell their chats to send the link again',
   async () => {
     const bot = start(DEPLOY)
@@ -1481,7 +1509,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, a short link whose yt-dlp -J ends meanwhile still goes out when a slot is free',
   async () => {
     const bot = start({ DRAIN_MS: '600000' })
@@ -1506,7 +1534,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, a link still in the queue hears to send it again; the running one finishes',
   async () => {
     const bot = start({ DRAIN_MS: '600000' })
@@ -1532,7 +1560,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, links waiting for or in yt-dlp -J hear to send them again, after the queued status of the waiting one',
   async () => {
     const bot = start({ DRAIN_MS: '600000' })
@@ -1568,7 +1596,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a queued link to a video that another link has sent meanwhile gets the cached file',
   async () => {
     const bot = start()
@@ -1597,7 +1625,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a link waiting for a yt-dlp -J turn hears it is queued',
   async () => {
     const bot = start()
@@ -1632,7 +1660,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a tweet without a video that waited for a yt-dlp -J turn has its queued status removed, a second request too',
   async () => {
     const bot = start()
@@ -1665,7 +1693,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, a failure message still on its way isn't turned into the exit notice",
   async () => {
     // the failure reply is still on its way when the deploy cuts
@@ -1684,7 +1712,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, a cached video on its way doesn't keep the exit notice next to it",
   async () => {
     // the cached resend is on its way when the deploy cuts, and arrives
@@ -1718,7 +1746,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, a job whose upload has begun keeps its status; a request following it hears to send the link again',
   async () => {
     // chat 1's upload doesn't end before the exit
@@ -1745,7 +1773,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, a download that ends after the cut hears to send the link again and is not uploaded',
   async () => {
     const bot = start(DEPLOY)
@@ -1768,7 +1796,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, a job at "⏫" whose upload has not begun by the cut hears to send the link again',
   async () => {
     // the job awaits its ⏫ status before the upload; the cut comes meanwhile
@@ -1791,7 +1819,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, a job at "⏫" still probing its file at the exit hears to send the link again',
   async () => {
     // an ffprobe that doesn't end before the exit (nor outlive the test)
@@ -1818,7 +1846,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: on a deploy, a guest reply whose download ends after the cut hears to send the link again',
   async () => {
     const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' })
@@ -1841,7 +1869,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a cached link whose file_id is dead is downloaded again, and the dead file_id is forgotten under every key',
   async () => {
     // short3's copy is gone from Telegram's servers (the fake Bot API answers
@@ -1901,7 +1929,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: on a deploy, the drain waits for a guest reply's notice to send the link again while it's on its way",
   async () => {
     // the notice waits until the test lets it go
@@ -1947,7 +1975,7 @@ function locked(data: string, seed: [key: string, file: string, url: string][] =
   return db
 }
 
-test.skipIf(skip)(
+e2e(
   "bot: another process holding the database's write lock as a job uploads costs neither its chat nor a request following the job the video",
   async () => {
     // The job's cache writes once its file is out (settle, put) meet the
@@ -1995,7 +2023,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: another process holding the database's write lock costs no cached link its video: one sent without a size, another link to one, one whose file_id is dead",
   async () => {
     // short1's copy went out before videos had their size (#281), and the
@@ -2059,7 +2087,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a refresh of an unsized video that uploads while another process holds the database's write lock still takes the old copy's place",
   async () => {
     // short1's copy went out before videos had their size, and its refresh's
@@ -2104,7 +2132,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a cached link whose row can't be read while another process commits is downloaded again, not failed",
   async () => {
     // A commit holds the lock that keeps readers out (BEGIN EXCLUSIVE here
@@ -2147,7 +2175,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a failed download logs how long it ran and the MB it got',
   async () => {
     const bot = start()
@@ -2170,7 +2198,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a download stops once one of its files passes 2000 MB, as too large, without reading the page again',
   async () => {
     // A minute is 1 s, so the files are weighed every 83 ms and a long
@@ -2228,12 +2256,13 @@ test.skipIf(skip)(
   },
   // its three waits and its 2 s pause come one after another, 57 s at most
   // by their budgets (the first wait's is 25 s: until() counts its 15 s
-  // from when the bot is up): a timeout of the last must still end, with
-  // its report, before the test's own timeout does
-  60_000,
+  // from when the bot is up): the timeout leaves each wait its whole budget,
+  // with 2 s for the steps between them (until() gives up STOP_MS before
+  // the timeout)
+  62_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: the time limit also stops a child of yt-dlp that holds its output, as ffmpeg does, and frees the slot',
   async () => {
     // half time: a short video's job has 3.75 s, and the child would keep
@@ -2306,12 +2335,12 @@ test.skipIf(skip)(
   },
   // its three waits come one after another, 25 s (until() counts the first
   // one's 15 s from when the bot is up), 15 s and then 25 s at most by their
-  // budgets: a timeout of the last must still end, with its report, before
-  // the test's own timeout does
+  // budgets: the timeout leaves each its whole budget (until() gives up
+  // STOP_MS before the timeout)
   70_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a timed-out run is over as yt-dlp and its child end, and leaves nothing in its group',
   async () => {
     // half time: a short video's job has 3.75 s, but a stopped run gets 10
@@ -2349,7 +2378,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a pipe holder that left a timed-out run's group doesn't keep the job",
   async () => {
     // half time: a short video's job has 3.75 s, and a stopped run gets 2.5
@@ -2375,7 +2404,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a download stopped as too large is over the grace time after the stop, even if a pipe holder left yt-dlp's group",
   async () => {
     // A minute is 1 s, so the files are weighed every 83 ms and a short
@@ -2402,7 +2431,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: the time limit's signals end with yt-dlp's run",
   async () => {
     // half time: a short video's job has 3.75 s, and a stopped run gets
@@ -2445,7 +2474,7 @@ test.skipIf(skip)(
   50_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a long video's download goes on past the time a short one gets",
   async () => {
     // half time: 3.75 s for a short video, 5.6 s for a long one. crawl1
@@ -2477,7 +2506,7 @@ test.skipIf(skip)(
   40_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a page read again gets only the time the job has left',
   async () => {
     // A minute is 250 ms, so a long video's job has 11.25 s, and
@@ -2512,7 +2541,7 @@ test.skipIf(skip)(
   45_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a page read again goes on from the failed download only in the format that got it',
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -2580,7 +2609,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a page read again that doesn't answer in the time the job has left stops with it",
   async () => {
     // a minute is 250 ms, so a short video's job has 7.5 s, and
@@ -2614,7 +2643,7 @@ test.skipIf(skip)(
 // The sent videos and audio files
 const files = (calls: Call[]) => calls.filter((c) => /^send(Video|Audio)$/.test(c.method))
 
-test.skipIf(skip)(
+e2e(
   "bot: a page read again that picks another video sends that one as itself, cached under its own id, not the first one's",
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -2665,12 +2694,12 @@ test.skipIf(skip)(
     expect(jobs.filter((l) => /^job ok host=www\.youtube\.com .*lane=short .* dur=30 wait=\S+ dl=/.test(l))).toHaveLength(2)
   },
   // its four waits come one after another, and under load the last one has
-  // begun almost 15 s in: a timeout of it must still end, with its report,
-  // before the test's own timeout does
+  // begun almost 15 s in: the timeout leaves it its whole 15 s (until() gives
+  // up STOP_MS before the timeout)
   45_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a post with several videos whose first one has changed when read again sends the new one, downloaded from its own info, not the post's",
   async () => {
     // As above, with old1 a post with several videos, whose -J is a playlist
@@ -2712,7 +2741,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a page read again that picks a live stream, or a video too big to send, says so',
   async () => {
     // A minute is 250 ms and "Downloading…" takes 500 ms to show, so the -J
@@ -2740,7 +2769,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   'bot: a refresh of an unsized video goes on only while the page picks that video, at the first read or when read again',
   async () => {
     // old1, old2 and old3 have copies cached under their links and ids
@@ -2829,7 +2858,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: a self-update that fails at start (GitHub's API limit) holds up neither polling nor downloads, and is tried again a minute later",
   async () => {
     // test/yt-dlp fails every self-update try and adds a line to $UPDATES for
@@ -2856,7 +2885,7 @@ test.skipIf(skip)(
   30_000,
 )
 
-test.skipIf(skip)(
+e2e(
   "bot: with promos on, another process's lock on the database costs neither a link handed a promo its video nor a /start from a campaign its help, and the bot keeps running",
   async () => {
     // Promo's stats (promo.ts) meet the lock. Held for writes (BEGIN
