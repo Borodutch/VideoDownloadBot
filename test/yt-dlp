@@ -193,6 +193,12 @@ if (args.includes('-J')) {
   const mark = join(dirname(out), 'fake-tried')
   const first = !existsSync(mark)
   writeFileSync(mark, '')
+  // one with "rehold" in it holds every download after the job's first (the
+  // one from the page read again) until the test is over: only the bot stops it
+  if (url.includes('rehold') && !first) {
+    while (existsSync(process.env.GATES!)) await Bun.sleep(20)
+    process.exit(1)
+  }
   const expired = url.includes('expired')
   if (expired && first) {
     await sleep(4000)

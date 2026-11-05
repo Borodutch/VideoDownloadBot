@@ -176,6 +176,27 @@ test('proxy: raw path and sized body go through, nothing after them does', async
   ).toStartWith('HTTP/1.1 400')
 })
 
+test('proxy: an answer says the connection closes after it, whatever the upstream said', async () => {
+  // upstreams that close after answering: one says nothing about the
+  // connection (as Bun's server), the other that it keeps it
+  const answers = [
+    'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok',
+    'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 2\r\n\r\nok',
+  ]
+  // and ones whose lines end in a bare LF, which go as they came: the head's
+  // end is seen, and a CRLF CRLF in the body isn't taken for it
+  const bare = ['HTTP/1.1 200 OK\nContent-Length: 2\n\nok', 'HTTP/1.1 200 OK\nContent-Length: 6\n\nok\r\n\r\n']
+  for (const answer of [...answers, ...bare]) {
+    const upstream = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data: (s) => void s.end(answer) } })
+    try {
+      const got = await raw(await open, `GET http://127.0.0.1:${upstream.port}/x HTTP/1.1\r\nHost: x\r\n\r\n`)
+      expect(got).toBe(bare.includes(answer) ? answer : 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok')
+    } finally {
+      upstream.stop(true)
+    }
+  }
+})
+
 test('proxy: an upstream killed by its idle timer closes the client too', async () => {
   // an upstream that takes the request and never answers or closes
   const stalled = createServer((s) => s.on('data', () => {}).on('error', () => {}))
@@ -237,17 +258,45 @@ async function run(proxy: string, args: string[], env: Record<string, string | u
     await rm(dir, { recursive: true, force: true })
   }
 }
+// The failure report of a run that should get the file: what yt-dlp said,
+// which tells why it didn't
+const said = (r: { code: number; err: string }) => `yt-dlp exited ${r.code}, its stderr:\n${r.err || '(none)'}`
 
 test.skipIf(!ytdlp)('yt-dlp: a public link redirecting inside is not fetched', async () => {
   const { hits, site } = inner()
   // control: without the restriction the redirect is followed and downloaded
   const control = await run(await open, [`http://127.0.0.1:${site.port}/redirect`])
-  expect([control.code, control.files, hits[0]]).toEqual([0, ['v.mp4'], '/v.mp4'])
+  expect([control.code, control.files, hits[0]], said(control)).toEqual([0, ['v.mp4'], '/v.mp4'])
   hits.length = 0
   const r = await run(await publicOnly, [`http://127.0.0.1:${site.port}/redirect`])
   expect(r.code).not.toBe(0)
   expect(r.err).toContain('403')
   expect([r.files, hits]).toEqual([[], []])
+}, 60_000)
+
+// The proxy takes one request per connection, so yt-dlp, whose connection
+// pool would keep one for its next request, must learn from the answer that it
+// closes: a redirect's request sent on it gets no answer. The close alone
+// tells yt-dlp only if it comes first, and a busy bot (or test) may send it
+// late (#458). Here a relay to the proxy passes the close on only once yt-dlp
+// has sent more on the connection, as late as it can come.
+test.skipIf(!ytdlp)("yt-dlp: a redirect's request goes on a new connection to the proxy", async () => {
+  const { hits, site } = inner()
+  const proxy = new URL(await open)
+  const relay = createServer((c) => {
+    const p = connect({ host: proxy.hostname, port: Number(proxy.port), allowHalfOpen: true })
+    let closed = false
+    p.on('data', (d) => c.write(d)).on('end', () => (closed = true)).on('error', () => {}).on('close', () => c.destroy())
+    c.on('data', (d) => (closed ? c.end() : p.write(d))).on('error', () => {}).on('close', () => p.destroy())
+  })
+  await new Promise<void>((ok) => relay.listen(0, '127.0.0.1', ok))
+  try {
+    const at = `http://127.0.0.1:${(relay.address() as AddressInfo).port}`
+    const r = await run(at, [`http://127.0.0.1:${site.port}/redirect`])
+    expect([r.code, r.files, hits[0]], said(r)).toEqual([0, ['v.mp4'], '/v.mp4'])
+  } finally {
+    relay.close()
+  }
 }, 60_000)
 
 test.skipIf(!ytdlp)('yt-dlp: a public page embedding an internal video is not fetched', async () => {
@@ -387,8 +436,8 @@ test.skipIf(!ytdlp || !ffmpeg)('yt-dlp: ffmpeg does not fetch an internal segmen
   try {
     const link = `http://127.0.0.1:${hls.port}/v.m3u8`
     // control: unrestricted, ffmpeg does reach the internal segment
-    await run(await open, ['--downloader', 'm3u8:ffmpeg', link])
-    expect(hits).toContain('/s.ts')
+    const control = await run(await open, ['--downloader', 'm3u8:ffmpeg', link])
+    expect(hits, said(control)).toContain('/s.ts')
     hits.length = 0
     const env = { ...process.env, no_proxy: internalHost, NO_PROXY: internalHost }
     const r = await run(await publicOnly, ['--downloader', 'm3u8:ffmpeg', link], env)

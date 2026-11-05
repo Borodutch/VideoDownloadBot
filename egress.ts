@@ -92,13 +92,14 @@ export function connectTarget(target: string) {
   return { host: url.hostname, port: port === undefined ? 443 : Number(port) }
 }
 
-// Resolves with everything read up to the end of the request head, or null
+// Resolves with everything read up to the end of the request head (or an
+// answer's, which may end its lines in a bare LF), or null
 function readHead(client: Socket) {
   return new Promise<Buffer | null>((r) => {
     let head = Buffer.alloc(0)
     const data = (chunk: Buffer) => {
       head = Buffer.concat([head, chunk])
-      if (head.includes('\r\n\r\n') || head.length > 64 * 1024) {
+      if (head.includes('\r\n\r\n') || head.includes('\n\n') || head.length > 64 * 1024) {
         client.off('data', data).pause()
         r(head)
       }
@@ -218,16 +219,43 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
       upstream.on('drain', () => client.resume())
       if (rest.length) forward(rest)
       client.on('data', forward)
+      // The answer goes back saying the connection closes after it (RFC 9112
+      // 9.6: a server that doesn't keep connections MUST). Upstreams asked to
+      // close mostly say so, but not all do (Bun's server doesn't), and a
+      // client that keeps the connection (yt-dlp's pool does) sends its next
+      // request, as a redirect's, on it: dropped, so it gets no answer (#458)
+      void readHead(upstream).then((answer) => {
+        if (!answer) return client.end()
+        client.write(closing(answer))
+        upstream.pipe(client)
+        upstream.resume()
+      })
     } else {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
       if (rest.length) upstream.write(rest)
       client.pipe(upstream)
+      upstream.pipe(client)
     }
-    upstream.pipe(client)
     // readHead paused it after the tunnel's answer; Bun's pipe doesn't resume
     upstream.resume()
     if (!upstream.writableNeedDrain) client.resume()
   }
+}
+
+// An answer read up to the end of its head, with "Connection: close" in that
+// head instead of whatever it said about the connection. A head over 64 KB
+// (readHead's limit), or one with bare LF line ends, goes as it came: the
+// first CRLF CRLF may be in its body then
+function closing(answer: Buffer) {
+  const end = answer.indexOf('\r\n\r\n')
+  const lf = answer.indexOf('\n\n')
+  if (end < 0 || (lf >= 0 && lf < end)) return answer
+  const [status, ...fields] = answer.subarray(0, end).toString('latin1').split('\r\n')
+  const kept = fields.filter((l) => !/^(connection|keep-alive|proxy-connection)$/i.test(l.split(':')[0]!.trim()))
+  return Buffer.concat([
+    Buffer.from([status, ...kept, 'Connection: close', '', ''].join('\r\n'), 'latin1'),
+    answer.subarray(end + 4),
+  ])
 }
 
 // Listens on loopback only; resolves to the proxy URL for --proxy

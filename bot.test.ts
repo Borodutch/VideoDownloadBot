@@ -1288,7 +1288,7 @@ test('floodWait: a 429 that ends the retries still holds the chat until the floo
 test("progress: a 429 on it comes back at once and skips the chat's next ones, other errors fail", async () => {
   const wait = floodWait()
   const fake = fakeApi(
-    (_, n) => (n === 1 ? flood(0.3) : { ok: false, error_code: 400, description: 'Bad Request: chat not found' }),
+    (_, n) => (n === 1 ? flood(1) : { ok: false, error_code: 400, description: 'Bad Request: chat not found' }),
     wait,
   )
   try {
@@ -1297,17 +1297,18 @@ test("progress: a 429 on it comes back at once and skips the chat's next ones, o
       signals.push(signal)
       return fake.api.sendMessage(-100, '⏬', undefined, signal)
     }
-    const start = Date.now()
     await progress(wait.flooded(-100), show)
-    expect(Date.now() - start).toBeLessThan(250)
+    // at once: back while the chat is still in the 1 s flood its 429 began,
+    // which a wait would have sat out (a bound on the time taken would count
+    // the fake server's answer as well, slow on a loaded machine)
+    expect(wait.flooded(-100)).toBe(true)
     expect(signals).toHaveLength(1)
     expect(signals[0]).toBe(PROGRESS)
-    // skipped while the chat is in the flood it started
-    expect(wait.flooded(-100)).toBe(true)
+    // skipped while the chat is in that flood
     await progress(wait.flooded(-100), show)
     expect(fake.methods()).toEqual(['sendMessage'])
     // after it, any other error still fails the job
-    await Bun.sleep(400)
+    await Bun.sleep(1100)
     expect(wait.flooded(-100)).toBe(false)
     await expect(progress(wait.flooded(-100), show)).rejects.toMatchObject({ error_code: 400 })
     expect(fake.methods()).toEqual(['sendMessage', 'sendMessage'])

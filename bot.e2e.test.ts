@@ -2480,15 +2480,19 @@ test.skipIf(skip)(
 test.skipIf(skip)(
   'bot: a page read again gets only the time the job has left',
   async () => {
-    // half time: a long video's job has 5.625 s, and "Downloading…" takes
-    // 250 ms to show, by when slowexpiredlong1's saved info is stale. Its
-    // download from that info fails after 2 s, then the page is read again
-    // (1.5 s, "slow") and downloaded from (4.5 s): in the 2.125 s left that
-    // times out, where the 3.625 s left before the read would still end later
-    const bot = start(HALF, (c) => (c.text?.startsWith('⏬') ? 250 : 0))
+    // A minute is 250 ms, so a long video's job has 11.25 s, and
+    // "Downloading…" takes 500 ms to show, by when the saved info of
+    // slowexpiredreholdlong1 is stale. At half the fake's times, its download
+    // from that info fails after 2 s, then the page is read again (1.5 s,
+    // "slow") and downloaded from: a download that never ends by itself
+    // ("rehold"), so only the job's time limit stops it, however long the
+    // yt-dlp runs took to start. Those start-ups only have to leave the page
+    // read again time to answer in the 9.25 s left (a minute of 125 ms left
+    // 2.1 s, which two start-ups on a loaded machine took up, #458)
+    const bot = start({ MINUTE_MS: '250', FAKE_SCALE: '0.5' }, (c) => (c.text?.startsWith('⏬') ? 500 : 0))
     let jobs: string[] = []
     try {
-      bot.link(1, 'slowexpiredlong1')
+      bot.link(1, 'slowexpiredreholdlong1')
       await bot.until(() => bot.statuses(1).some((s) => s.startsWith('😱')), 30_000)
     } finally {
       jobs = await bot.stop()
@@ -2497,12 +2501,13 @@ test.skipIf(skip)(
     expect(jobs).toHaveLength(1)
     const line = jobs[0]!
     // the same pick, though the try from saved info got nothing
-    expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=long .* reread=1 kept=0 dl=\d+\.\d mb=2 total=/)
-    // the job's 5.625 s in all, not 2 s and then another 5.625, nor 2 s, the
-    // read again and 3.625 s
+    expect(line).toMatch(/^job timeout host=www\.youtube\.com .*lane=long .* reread=1 kept=0 dl=\d+\.\d mb=0 total=/)
+    // the job's 11.25 s in all: not 2 s and then another 11.25 s, nor the
+    // read's 1.5 s on top (the download from it given all the time that was
+    // left before the read)
     const dl = Number(/ dl=([\d.]+)/.exec(line)![1])
-    expect(dl).toBeGreaterThanOrEqual(5.6)
-    expect(dl).toBeLessThan(7.5)
+    expect(dl).toBeGreaterThanOrEqual(11.2)
+    expect(dl).toBeLessThan(12.75)
   },
   45_000,
 )
