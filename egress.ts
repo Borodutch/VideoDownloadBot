@@ -92,19 +92,50 @@ export function connectTarget(target: string) {
   return { host: url.hostname, port: port === undefined ? 443 : Number(port) }
 }
 
-// Resolves with everything read up to the end of the request head (or an
-// answer's, which may end its lines in a bare LF), or null
-function readHead(client: Socket) {
-  return new Promise<Buffer | null>((r) => {
-    let head = Buffer.alloc(0)
+// Where a head ends: just past its first empty line, as clients read it (a
+// line ends at an LF, a CR before it dropped), within the first 64 KB; or -1.
+// It reads no further than that line.
+function headEnd(b: Buffer) {
+  const max = Math.min(b.length, 64 * 1024)
+  for (let lf = b.indexOf(10); lf >= 0 && lf < max; lf = b.indexOf(10, lf + 1)) {
+    const next = b[lf + 1] === 13 ? lf + 2 : lf + 1
+    if (next < max && b[next] === 10) return next + 1
+  }
+  return -1
+}
+
+// A CR or LF outside a CRLF. Clients may split a head with one into other
+// lines than its CRLFs make, so such a head isn't taken apart line by line
+const bare = /\r(?!\n)|(?<!\r)\n/
+const bareLf = /(?<!\r)\n/
+
+// Resolves with buf and what s sends after it, up to the chunk that ends a
+// head (or passes 64 KB), leaving s paused; closed if s closed first
+export function readHead(s: Socket, buf: Buffer = Buffer.alloc(0)) {
+  return new Promise<{ got: Buffer; closed: boolean }>((r) => {
+    if (headEnd(buf) >= 0 || buf.length > 64 * 1024) return r({ got: buf, closed: false })
+    if (s.destroyed) return r({ got: buf, closed: true })
+    // Each chunk is looked at once, after the last two bytes before it (an end
+    // not seen yet can only start at an LF in them), and the head is put
+    // together once: a head that trickles in costs linear time. (Looking from
+    // its start on every chunk let an upstream keep the bot's thread busy,
+    // #462.)
+    const chunks = [buf]
+    let length = buf.length
+    let last = buf.subarray(-2)
     const data = (chunk: Buffer) => {
-      head = Buffer.concat([head, chunk])
-      if (head.includes('\r\n\r\n') || head.includes('\n\n') || head.length > 64 * 1024) {
-        client.off('data', data).pause()
-        r(head)
-      }
+      chunks.push(chunk)
+      length += chunk.length
+      const seen = Buffer.concat([last, chunk])
+      if (headEnd(seen) < 0 && length <= 64 * 1024) return void (last = seen.subarray(-2))
+      s.off('data', data).off('close', closed).pause()
+      r({ got: Buffer.concat(chunks, length), closed: false })
     }
-    client.on('data', data).once('close', () => r(null))
+    const closed = () => {
+      s.off('data', data)
+      r({ got: Buffer.concat(chunks, length), closed: true })
+    }
+    s.on('data', data).once('close', closed).resume()
   })
 }
 
@@ -116,11 +147,14 @@ export type Via = (host: string) => string | undefined
 async function serve(client: Socket, allow: (ip: string) => boolean, idle: number, via: Via) {
   client.setTimeout(5 * 60_000, () => client.destroy())
   client.on('error', () => {})
-  const head = await readHead(client)
-  if (!head) return
-  const end = head.indexOf('\r\n\r\n')
+  const { got: head, closed } = await readHead(client)
+  if (closed) return
+  const end = headEnd(head)
   if (end < 0) return reply(client, '431 Request Header Fields Too Large')
-  const lines = head.subarray(0, end).toString('latin1').split('\r\n')
+  const text = head.toString('latin1', 0, end)
+  // an upstream could read other lines in it than these
+  if (bare.test(text)) return reply(client, '400 Bad Request')
+  const lines = text.slice(0, -4).split('\r\n')
   const [method, target, version, extra] = lines[0]!.split(' ')
   const fields = (name: string) =>
     lines
@@ -197,7 +231,7 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
     const at = isIP(ip) === 6 ? `[${ip}]:${port}` : `${ip}:${port}`
     upstream.write(`CONNECT ${at} HTTP/1.1\r\nHost: ${at}\r\n\r\n`)
     const answer = await readHead(upstream)
-    if (!answer || !/^HTTP\/1\.[01] 200 /.test(answer.toString('latin1'))) {
+    if (answer.closed || !/^HTTP\/1\.[01] 200 /.test(answer.got.toString('latin1'))) {
       upstream.destroy()
       return reply(client, '502 Bad Gateway')
     }
@@ -206,7 +240,7 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
   upstream.once('connect', () => (hop2 ? void tunnel() : go()))
   const go = () => {
     open = true
-    const rest = head.subarray(end + 4)
+    const rest = head.subarray(end)
     if (request) {
       upstream.write(request)
       const forward = (chunk: Buffer) => {
@@ -219,17 +253,7 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
       upstream.on('drain', () => client.resume())
       if (rest.length) forward(rest)
       client.on('data', forward)
-      // The answer goes back saying the connection closes after it (RFC 9112
-      // 9.6: a server that doesn't keep connections MUST). Upstreams asked to
-      // close mostly say so, but not all do (Bun's server doesn't), and a
-      // client that keeps the connection (yt-dlp's pool does) sends its next
-      // request, as a redirect's, on it: dropped, so it gets no answer (#458)
-      void readHead(upstream).then((answer) => {
-        if (!answer) return client.end()
-        client.write(closing(answer))
-        upstream.pipe(client)
-        upstream.resume()
-      })
+      void passAnswer(upstream, client)
     } else {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
       if (rest.length) upstream.write(rest)
@@ -242,20 +266,91 @@ async function serve(client: Socket, allow: (ip: string) => boolean, idle: numbe
   }
 }
 
-// An answer read up to the end of its head, with "Connection: close" in that
-// head instead of whatever it said about the connection. A head over 64 KB
-// (readHead's limit), or one with bare LF line ends, goes as it came: the
-// first CRLF CRLF may be in its body then
-function closing(answer: Buffer) {
-  const end = answer.indexOf('\r\n\r\n')
-  const lf = answer.indexOf('\n\n')
-  if (end < 0 || (lf >= 0 && lf < end)) return answer
-  const [status, ...fields] = answer.subarray(0, end).toString('latin1').split('\r\n')
-  const kept = fields.filter((l) => !/^(connection|keep-alive|proxy-connection)$/i.test(l.split(':')[0]!.trim()))
-  return Buffer.concat([
-    Buffer.from([status, ...kept, 'Connection: close', '', ''].join('\r\n'), 'latin1'),
-    answer.subarray(end + 4),
-  ])
+// The upstream's answer goes back saying the connection closes after it (RFC
+// 9112 9.6: a server that doesn't keep connections MUST, in every answer but
+// a 1xx). Upstreams asked to close mostly say so, but not all do (Bun's server
+// doesn't), and a client that keeps the connection (yt-dlp's pool does) sends
+// its next request, as a redirect's, on it: dropped, so it gets no answer
+// (#458). Informational (1xx) heads before the final one go as they came.
+async function passAnswer(upstream: Socket, client: Socket) {
+  let got: Buffer = Buffer.alloc(0)
+  // the 1xx heads passed on, which don't wait for the client to take them
+  let early = 0
+  for (;;) {
+    const read = await readHead(upstream, got)
+    got = read.got
+    // Closed before a head ended: what came goes as it came, as before #458.
+    // Clients (Python's http.client) take the close for the head's end, and
+    // the connection closes with it
+    if (read.closed) return void client.end(got)
+    const end = headEnd(got)
+    // no head in the first 64 KB: not one to change
+    if (end < 0) break
+    const head = got.subarray(0, end)
+    const code = status(head)
+    // A 101 hands the connection to another protocol: the rest goes as it
+    // came, piped. Any head but a 1xx's is the final one, whatever its status
+    // line says (as on #458), and says the connection closes. Past 64 KB of
+    // 1xx heads (an upstream that never ends them) nothing is a head either.
+    if (code === 101) break
+    if (!(code >= 100 && code < 200)) {
+      got = Buffer.concat([closing(head), got.subarray(end)])
+      break
+    }
+    if ((early += end) > 64 * 1024) break
+    client.write(head)
+    got = got.subarray(end)
+  }
+  if (got.length) client.write(got)
+  upstream.pipe(client)
+  upstream.resume()
+}
+
+// The code in a head's status line as Python's http.client (yt-dlp's) reads
+// it: the line split at any blank it knows, a version that starts with HTTP/,
+// then a code int() takes ("0200", "+200" and "2_00" too); or NaN
+function status(head: Buffer) {
+  const line = head.toString('latin1', 0, head.indexOf(10))
+  const [version, code = ''] = line.split(/[\t\n\v\f\r\x1c-\x1f \x85\xa0]+/).filter(Boolean)
+  return version?.startsWith('HTTP/') && /^\+?\d+(_\d+)*$/.test(code) ? Number(code.replace(/_/g, '')) : NaN
+}
+
+// An answer's head with "Connection: close", right after the status line,
+// instead of whatever it said about the connection (its Connection,
+// Keep-Alive and Proxy-Connection fields go: for HTTP/1.0, Python keeps a
+// connection with either of the last two, whatever Connection says). The
+// close comes first because Python's header parser stops at a malformed field
+// line, so a close after one would be lost. A head with a bare LF goes as it
+// came, since its clients may end it elsewhere (a mixed "LF CRLF" ends it for
+// them, #462). In one with a bare CR, which Python splits lines at and ffmpeg
+// doesn't, the lines with one go as they came. Otherwise folded lines are
+// unfolded first, as RFC 9112 5.2 has a proxy do, so a dropped field's
+// continuation doesn't join the field before it (in a bare-CR head, which
+// isn't unfolded, it goes with the field), and lines with blanks before them
+// right after the status line, which continue no field, are dropped (RFC 9112
+// 2.2) rather than fold into the close. (Blanks before a fold stay: matching
+// them too takes quadratic time on a long run.)
+export function closing(head: Buffer) {
+  const text = head.toString('latin1')
+  if (bareLf.test(text)) return head
+  const at = text.indexOf('\r\n')
+  const section = text.slice(at + 2, -4)
+  const connection = (l: string) => /^(connection|keep-alive|proxy-connection)$/i.test(l.split(':')[0]!.trim())
+  let fields: string[] = []
+  if (bare.test(text)) {
+    // whether the line goes, with the lines that continue it
+    let drop = true
+    for (const l of section ? section.split('\r\n') : []) {
+      if (bare.test(l)) drop = false
+      else if (!/^[ \t]/.test(l)) drop = connection(l)
+      if (!drop) fields.push(l)
+    }
+  } else
+    fields = section
+      .replace(/\r\n[ \t]+/g, ' ')
+      .split('\r\n')
+      .filter((l) => /^[^ \t]/.test(l) && !connection(l))
+  return Buffer.from([text.slice(0, at), 'Connection: close', ...fields, '', ''].join('\r\n'), 'latin1')
 }
 
 // Listens on loopback only; resolves to the proxy URL for --proxy
