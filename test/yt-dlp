@@ -33,23 +33,25 @@
 // leaves a process in its group that
 // doesn't hold its output and outlives it by 15 s, writing "up", then "done"
 // or "TERM" if it got SIGTERM, to $LINGER/<id>.<its pid>, or with "deaf" in it
-// too one that ignores SIGTERM and lives 10 s; one with "ffmpeg" in it, 2 MB
-// in, waits 20 s for a child that has its stdout and stderr, as yt-dlp waits
-// for the ffmpeg it hands m3u8 to, a child that ignores SIGTERM when
-// "stubborn" is in it too (with $LINGER set, its pid goes to
-// $LINGER/<id>.pid), and one in a session of its own, out of yt-dlp's
-// process group, when "escape" is; one with "endless" in it, as an HLS
-// stream of unknown size, starts a 20 s child that has its stdout and stderr
-// (as ffmpeg would), in a session of its own when "escape" is in it too, has
-// 2 MB, then after 0.5 s 2001 MB (a sparse file), and is done with that file
-// when the child is; with $LINGER set it also leaves a
-// process in its group that ignores SIGTERM, doesn't hold its output, writes
-// "up" to $LINGER/<id>.<its pid> and lives until the test is over (its $GATES
-// dir is gone), a minute at most: only a SIGKILL stops it sooner, and the
-// file passes 2000 MB only once it has written "up"; one with
-// "parts" in it has a merge on disk for 1 s, 1900 and 100 MB parts and their
-// 2000 MB merged copy, v.temp.mp4 at first and v.mp4 from 0.5 s on, as a
-// merge renames it before the parts go)
+// too one that ignores SIGTERM, writes "up" there and never ends by itself
+// (such a process lives until the test is over, its $GATES dir gone, or
+// about a minute: meanwhile only a signal it doesn't ignore stops it); one with
+// "ffmpeg" in it, 2 MB in, waits for a child that has its stdout and stderr
+// and never ends by itself, as yt-dlp waits for the ffmpeg it hands m3u8 to,
+// a child that ignores SIGTERM when "stubborn" is in it too (with $LINGER
+// set, its pid goes to $LINGER/<id>.pid), and one in a session of its own,
+// out of yt-dlp's process group, when "escape" is; one with "endless" in it,
+// as an HLS stream of unknown size, starts a child that has its stdout and
+// stderr (as ffmpeg would) and never ends by itself, in a session of its own
+// when "escape" is in it too, has 2 MB, then after 0.5 s 2001 MB (a sparse
+// file), and is done with that file when the child is; with $LINGER set it
+// also leaves a process in its group that ignores SIGTERM, doesn't hold its
+// output, writes "up" to $LINGER/<id>.<its pid> and never ends by itself:
+// only a SIGKILL stops it before the test is over, and the file passes 2000
+// MB only once it has written "up"; one with "parts" in it has a merge on
+// disk for 1 s, 1900 and 100 MB parts and their 2000 MB merged copy,
+// v.temp.mp4 at first and v.mp4 from 0.5 s on, as a merge renames it before
+// the parts go)
 import {
   appendFileSync,
   copyFileSync,
@@ -63,7 +65,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-// FAKE_SCALE scales every wait below (bot.e2e.test.ts halves them for its time limit tests)
+// FAKE_SCALE scales every wait below but `forever`'s (bot.e2e.test.ts halves them for its time limit tests)
 const SCALE = Number(process.env.FAKE_SCALE) || 1
 const sleep = (ms: number) => Bun.sleep(ms * SCALE)
 const args = process.argv.slice(2)
@@ -207,10 +209,16 @@ if (args.includes('-J')) {
     process.exit(0)
   }
   const crawl = url.includes('crawl') || (expired && !first)
+  // a child's shell that never ends by itself while the test runs: it lives
+  // until the test is over (the harness removes $GATES), or about a minute if
+  // the test never got to that, so a test sees whatever ended it before then,
+  // and no time it would have taken to end can race that
+  const forever = 'i=0; while [ -d "$GATES" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done'
   if (url.includes('linger')) {
-    const deaf = url.includes('deaf')
-    const trap = deaf ? "trap '' TERM" : `trap 'echo TERM >> "$log"; exit' TERM`
-    Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; ${trap}; echo up >> "$log"; sleep ${(deaf ? 10 : 15) * SCALE} & wait; echo done >> "$log"`], {
+    const lives = url.includes('deaf')
+      ? `trap '' TERM; echo up >> "$log"; ${forever}`
+      : `trap 'echo TERM >> "$log"; exit' TERM; echo up >> "$log"; sleep ${15 * SCALE} & wait; echo done >> "$log"`
+    Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; ${lives}`], {
       env: { ...process.env, V: new URL(url).searchParams.get('v')! },
       stdio: ['ignore', 'ignore', 'ignore'],
     }).unref()
@@ -218,8 +226,8 @@ if (args.includes('-J')) {
   if (url.includes('ffmpeg')) {
     writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
     const child = url.includes('stubborn')
-      ? ['sh', '-c', `[ -n "$LINGER" ] && echo $$ > "$LINGER/$V.pid"; trap '' TERM; exec sleep ${20 * SCALE}`]
-      : ['sleep', String(20 * SCALE)]
+      ? ['sh', '-c', `[ -n "$LINGER" ] && echo $$ > "$LINGER/$V.pid"; trap '' TERM; ${forever}`]
+      : ['sh', '-c', forever]
     await Bun.spawn(child, {
       env: { ...process.env, V: new URL(url).searchParams.get('v')! },
       stdout: 'inherit',
@@ -234,9 +242,9 @@ if (args.includes('-J')) {
   }
   if (url.includes('endless')) {
     // before the file is too big: a stop would miss a child forked as it comes
-    const child = Bun.spawn(['sleep', String(20 * SCALE)], { stdout: 'inherit', stderr: 'inherit', detached: url.includes('escape') })
+    const child = Bun.spawn(['sh', '-c', forever], { stdout: 'inherit', stderr: 'inherit', detached: url.includes('escape') })
     const linger = process.env.LINGER
-      ? Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; i=0; while [ -d "$GATES" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done`], {
+      ? Bun.spawn(['sh', '-c', `log="$LINGER/$V.$$"; trap '' TERM; echo up >> "$log"; ${forever}`], {
           env: { ...process.env, V: new URL(url).searchParams.get('v')! },
           stdio: ['ignore', 'ignore', 'ignore'],
         })
