@@ -4,6 +4,8 @@
 // no video on a page off YouTube (an article) and describes a YouTube link
 // (one with "long" in it is a 50-minute video, one with "slow" takes 3 s to
 // describe, one with "fail" is unavailable, one with "tweet" is a tweet without a video,
+// one with "news" is a news article without media, which BBC's or CNN's
+// extractor tells as a playlist with no entries,
 // one with "reel" in it is an Instagram reel and one with "stream" in it a
 // stream, neither saying how long it is; the video's id is the v= parameter,
 // the format it picks "a", or "b" for one with "swap" in it when the page has
@@ -83,6 +85,7 @@ const youtube = (link: string) => /^(www\.)?(youtube\.com|youtu\.be)$/.test(new 
 if (args.includes('--list-extractors')) {
   // each extractor's name, then the links it claims, as yt-dlp prints them
   const links = args.slice(args.indexOf('--') + 1)
+  for (const link of links) if (link.includes('lhold')) await hold(new URL(link).searchParams.get('v')!, 'L')
   const list = (ie: string, claimed: string[]) => [ie, ...claimed.map((link) => `  ${link}`)]
   console.log([...list('generic', links), ...list('youtube', links.filter(youtube))].join('\n'))
   process.exit(0)
@@ -100,6 +103,22 @@ const id = new URL(url).searchParams.get('v')!
 const long = url.includes('long')
 const reel = url.includes('reel')
 const lengthless = reel || url.includes('stream')
+// one with "jhold" in it holds its -J (whether or not it finds a video), one
+// with "dhold" its download and one with "lhold" its check (--list-extractors,
+// above), until the test releases it ($GATES/<id>.J, .dl or .L appears;
+// <id>.J.held says it's held): no timing to race
+async function hold(v: string, what: 'J' | 'dl' | 'L') {
+  const gates = process.env.GATES!
+  writeFileSync(join(gates, `${v}.${what}.held`), '')
+  while (!existsSync(join(gates, `${v}.${what}`))) {
+    // the test is over (a killed bot leaves this run behind)
+    if (!existsSync(gates)) process.exit(1)
+    await Bun.sleep(20)
+  }
+}
+if (args.includes('-J')) {
+  if (url.includes('jhold')) await hold(id, 'J')
+} else if (url.includes('dhold')) await hold(id, 'dl')
 if (args.includes('-J') && url.includes('fail')) {
   console.error('ERROR: [youtube] x: Video unavailable')
   process.exit(1)
@@ -107,6 +126,10 @@ if (args.includes('-J') && url.includes('fail')) {
 if (args.includes('-J') && url.includes('tweet')) {
   console.error('ERROR: [twitter] 123: No video could be found in this tweet')
   process.exit(1)
+}
+if (args.includes('-J') && url.includes('news')) {
+  console.log(JSON.stringify({ _type: 'playlist', id, extractor_key: 'BBC', title: 'Article', webpage_url: url, entries: [] }))
+  process.exit(0)
 }
 const pages = process.env.PAGES
 const log = pages ? join(pages, id) : undefined
@@ -118,21 +141,6 @@ function read() {
   if (log) appendFileSync(log, 'read\n')
   return (url.includes('swap') && before) || (url.includes('flip') && reads >= 3) ? 'b' : 'a'
 }
-// one with "jhold" in it holds its -J, one with "dhold" its download, until
-// the test releases it ($GATES/<id>.J or .dl appears; <id>.J.held says it's
-// held): no timing to race
-async function hold(what: 'J' | 'dl') {
-  if (!url.includes(what === 'J' ? 'jhold' : 'dhold')) return
-  const gates = process.env.GATES!
-  writeFileSync(join(gates, `${id}.${what}.held`), '')
-  while (!existsSync(join(gates, `${id}.${what}`))) {
-    // the test is over (a killed bot leaves this run behind)
-    if (!existsSync(gates)) process.exit(1)
-    await Bun.sleep(20)
-  }
-}
-if (args.includes('-J')) await hold('J')
-else await hold('dl')
 if (args.includes('-J') && url.includes('slow')) await sleep(3000)
 if (args.includes('-J') && url.includes('stuck') && before) await sleep(30_000)
 const next = new URL(url).searchParams.get('next')

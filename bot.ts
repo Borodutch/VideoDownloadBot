@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { type Api, Bot, type Context, GrammyError, InputFile, type Transformer } from 'grammy'
 import type { ApiResponse, InputMediaVideo, Message } from 'grammy/types'
-import { existsSync } from 'node:fs'
+import { existsSync, rmSync, writeFileSync } from 'node:fs'
 import { chmod, copyFile, mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { egressProxy, proxyFreeEnv } from './egress'
@@ -32,6 +32,18 @@ const MAX_DOWNLOADS = Number(env.MAX_DOWNLOADS || 8)
 const MINUTE = Number(env.MINUTE_MS) || 60_000
 // how long a stopped yt-dlp run gets before it's over (bot.e2e.test.ts halves it)
 const GRACE = Number(env.GRACE_MS) || 5_000
+// How long after a guest message was sent the bot may wait for yt-dlp to find
+// a video before it answers (guest()). Telegram expires a guest query that
+// has no answer ("query is too old") but doesn't say when; a guest-mode bot
+// in production answers its long runs at 45 s
+// (github.com/aspalagin/openclaw-telegram-guest-mode). In 48 h of job lines,
+// 4 of 1,732 pages without a video took over 30 s to get and run their -J.
+const GUEST_WAIT = Number(env.GUEST_WAIT_MS) || 30_000
+// bot.e2e.test.ts sets GUEST_GATES to a folder: then that wait ends when the
+// test lets it, as $GUEST_GATES/<the message's guest_query_id> appears
+// (<guest_query_id>.held says it's waiting), instead of after GUEST_WAIT,
+// so no test races that timer (deadline())
+const GUEST_GATES = env.GUEST_GATES
 // Only formats whose every request goes through the proxy: yt-dlp's own HTTP
 // (HLS, DASH, websockets) and ffmpeg's http(s), which yt-dlp hands the proxy
 // to. rtmp, rtsp and mms would connect directly.
@@ -150,6 +162,41 @@ const TWEET_NO_VIDEO = /\[twitter\].*no video could be found/i
 // only gets an answer from whoever asked the bot itself.
 export const answer = (key: Key | null, chat: string, called: boolean, why = '') =>
   TWEET_NO_VIDEO.test(why) ? null : key ?? (chat === 'private' || called ? 'failed' : null)
+
+// What a guest message that doesn't mention the bot hears about a failed link
+// before it has had an answer, null = nothing: what a group message would
+// without a status up (guest()). That's not even the restart that dropped the
+// link, whose page may have no video.
+export const unasked = (key: Key | null, why = '') => {
+  const told = answer(key, 'guest', false, why)
+  return told === 'restarting' ? null : told
+}
+
+// Calls f in ms, when the answer to guest message id can't wait any longer
+// (guest()), or with GUEST_GATES once the test lets it: never in the turn
+// that sets it, so what that turn's own promises note comes first. Returns
+// what calls it off.
+export function deadline(id: string, ms: number, f: () => void) {
+  if (!GUEST_GATES) {
+    const timer = setTimeout(f, Math.max(0, ms))
+    return () => clearTimeout(timer)
+  }
+  const gate = join(GUEST_GATES, id)
+  let on = true
+  const off = () => {
+    on = false
+    rmSync(`${gate}.held`, { force: true })
+  }
+  writeFileSync(`${gate}.held`, '')
+  void (async () => {
+    do await Bun.sleep(20)
+    while (on && !existsSync(gate))
+    if (!on) return
+    off()
+    f()
+  })()
+  return off
+}
 
 // Whether a chat hears that its link waits for a slot, or that a restart
 // dropped it. Groups only do when they asked the bot itself: a burst of links
@@ -672,8 +719,11 @@ const cacheKey = (v: any) => `${v.extractor_key}:${v.id}`
 const slots = limit(MAX_DOWNLOADS, Math.max(1, MAX_DOWNLOADS - 1))
 // yt-dlp -J, which tells a job's lane, runs before it takes a slot
 const meta = limit(MAX_DOWNLOADS)
-// group links are checked one yt-dlp run per message: a flood of them
-// queues instead of forking a process each
+// The links of a group or guest message that doesn't mention the bot are
+// checked one yt-dlp run per message (requested()), and a job whose -J fails
+// without an extractor's tag checks its link (claims()): a flood of them
+// queues instead of forking a process each. A guest message's wait here
+// counts against the time its answer may wait (GUEST_WAIT).
 const check = limit(2)
 
 // The signal of a progress message, which isn't worth a flood wait. grammY's
@@ -1089,6 +1139,9 @@ function main() {
   const open = new Set<() => void>()
   // Set by the exit's cut: from then on no job begins an upload (job())
   let exiting = false
+  // Set once a deploy's drain has begun: from then on a guest message that
+  // doesn't mention the bot isn't answered just because its time is up (guest())
+  let draining = false
   // Handlers run detached; counted so a deploy lets the running ones finish
   let running = 0
   const track = (p: Promise<unknown>) => {
@@ -1590,39 +1643,102 @@ function main() {
     }
   }
 
-  // Guest mode: the bot gets one reply in a chat it isn't in. It answers with
-  // a status text at once and edits the video into it when it's ready.
+  // Guest mode: the bot gets one reply in a chat it isn't in, the answer to
+  // the guest message. It goes out with a status text, which is edited as the
+  // job goes on and into the video when it's ready.
   async function guest(ctx: Context) {
     const msg = ctx.guestMessage!
     const lang = ctx.from?.language_code
     const me = { ...ctx.me, mine }
+    const called = summoned(msg, me.username)
     // Telegram calls it on a plain reply to one of its messages too, so as
     // in a group a link in one that doesn't mention the bot only counts on a
-    // site yt-dlp knows. Unlike a group's, its answer comes before -J: a
-    // page without a video there (a news site's article, a tweet without
-    // one) still hears "Downloading…", then the failure. One that asks for
-    // nothing ("thanks") gets the help only if it mentions the bot; its own
-    // message forwarded or copied here, mention and all, gets nothing either.
+    // site yt-dlp knows (and gets its answer once -J has found a video
+    // there, below). One that asks for nothing ("thanks") gets the help only
+    // if it mentions the bot; its own message forwarded or copied here,
+    // mention and all, gets nothing either.
     const url = (await requested(msg, me, 'guest'))[0]
-    if (!url && (own(msg, me) || !summoned(msg, me.username))) return
-    const { inline_message_id: id } = await ctx.answerGuestQuery({
-      type: 'article',
-      id: 'status',
-      title: ctx.me.first_name,
-      input_message_content: {
-        message_text: t(lang, url ? 'downloading' : 'help'),
-      },
-    })
+    if (!url && (own(msg, me) || !called)) return
+    // Shows key in the reply after the texts before it: the first one posts
+    // the reply (the answer), the others edit it, unless key is the one asked
+    // for last (Telegram refuses an edit that changes nothing; a progress
+    // edit a flood dropped counts too, harmless as statuses only move on).
+    // Resolves to the reply's id, undefined when the answer failed.
+    let reply: Promise<string | undefined> | undefined
+    let shown: Key | undefined
+    const say = (key: Key, signal?: Signal) => {
+      if (reply && key === shown) return reply
+      shown = key
+      return (reply = reply
+        ? reply.then(async (id) => {
+            if (id) await ctx.api.editMessageTextInline(id, t(lang, key), undefined, signal).catch(() => {})
+            return id
+          })
+        : ctx
+            .answerGuestQuery({
+              type: 'article',
+              id: 'status',
+              title: ctx.me.first_name,
+              input_message_content: { message_text: t(lang, key) },
+            })
+            .then(
+              (m) => m.inline_message_id,
+              (e) => void console.error('guest answer failed', url, (e as Error).message),
+            ))
+    }
+    // How much longer the answer to one that doesn't mention the bot may wait
+    // for -J, in ms (below)
+    const left = () => msg.date * 1000 + GUEST_WAIT - Date.now()
+    // Answered at once: a mention; one with no time left to wait (handled
+    // late, as after an outage), unless a deploy's drain has begun (then its
+    // time being up doesn't answer it, below); one whose link the bot has a
+    // copy of, so a video's (deliver() sends that copy, or downloads the
+    // video again first when the copy went out without its size; should the
+    // copy be gone and the page have no video any more, it hears the
+    // failure). A copy whose row another process's lock keeps from being
+    // read counts as none (get()). When that answer fails (the query is too
+    // old by now), nobody would see the video: there's no job.
+    if ((called || (left() <= 0 && !draining) || (url && get(url))) && !(await say(url ? 'downloading' : 'help'))) return
     if (!url) return
-    const status = (key: Key, signal?: Signal) =>
-      ctx.api
-        .editMessageTextInline(id, t(lang, key), undefined, signal)
-        .then(() => {}, () => {})
-    if (!STORAGE) return status('failed')
+    if (!STORAGE) {
+      if (reply) await say('failed')
+      return
+    }
     const dest: Dest = { chat: STORAGE, who: ctx.from?.id }
+    // Otherwise it has no answer while its link waits for a -J turn or a
+    // slot, as in a group: it's answered "Downloading…" once -J has found a
+    // video and the download begins. A page without one gets no answer at
+    // all, nor does a tweet without a video; a link that fails for real
+    // hears what a group would (unasked()).
+    // The answer can't wait for -J longer than Telegram keeps the query,
+    // though: GUEST_WAIT after the message was sent it goes out with where
+    // the job is ("In the queue" once it has had to wait for a -J turn or a
+    // slot, even while it then reads the page, as a mention shows it;
+    // "Downloading…" otherwise), and then a page without a video hears so,
+    // as a mention would. Not once a deploy's drain has begun: the exit
+    // could leave a page without a video showing "Downloading…" for good.
+    let last: Key = 'downloading'
+    const late = reply
+      ? undefined
+      : deadline(msg.guest_query_id!, left(), () => {
+          if (!reply && !draining) void say(last)
+        })
+    // The job doesn't wait for the reply: the answer goes through a flood
+    // wait (it's the one chance to post), which mustn't hold a slot, and an
+    // edit after it waits for it. Progress isn't worth a flood wait, as in
+    // handle(). Past the exit's cut no job begins an upload (job()), so one
+    // with no answer yet stays without, as a group's request the cut found:
+    // its "Downloading…" could only lead to "send the link again", or stay
+    // up for good.
+    const status = async (key: Key) => {
+      if (!reply && key === 'queued') last = key
+      else if (reply || !exiting) void say(key, PROGRESS)
+    }
     try {
-      // progress isn't worth a flood wait, as in handle()
-      const f = await deliver(dest, url, (key) => status(key, PROGRESS))
+      const f = await deliver(dest, url, status)
+      late?.()
+      const id = await (reply ?? say('downloading'))
+      if (!id) return
       const { caption, parse_mode } = options(dest, f)!
       await ctx.api.editMessageMediaInline(id, {
         type: f.kind,
@@ -1631,8 +1747,12 @@ function main() {
         parse_mode,
       } as InputMediaVideo)
     } catch (e) {
+      late?.()
       console.error('guest failed', url, (e as Error).message)
-      await status((e instanceof Fail && e.key) || 'failed')
+      const key = e instanceof Fail ? e.key : 'failed'
+      // once answered it hears what went wrong, as a mention does
+      const told = reply ? key || 'failed' : unasked(key, (e as Error).message)
+      if (told) await say(told)
     } finally {
       // detached: a long flood wait mustn't hold the handler (and a deploy's drain)
       const sent = dest.sent
@@ -1734,6 +1854,7 @@ function main() {
         // (it couldn't finish before the exit): they hear so rather than stay
         // "in the queue". A short one that finds a free turn still goes.
         console.log(`draining ${running}`)
+        draining = true
         meta.close(new Fail('restarting'))
         slots.close(new Fail('restarting'))
         // the jobs still running 2 s before the exit won't finish: their

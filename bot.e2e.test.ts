@@ -29,6 +29,8 @@ type Call = {
   performer?: string
   duration?: number
   unique?: string
+  // when the fake Bot API got it (Date.now())
+  at: number
 }
 // The video every fake download copies (FAKE_MP4), made once: an ffmpeg run
 // per test, in spawnSync, would hold up all the concurrent ones (0.4 s each)
@@ -45,6 +47,8 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
   // upload = a file sent, not a file_id
   const calls: Call[] = []
   const updates: { update_id: number }[] = []
+  // when each guest message (by its query) was sent, in s
+  const dates = new Map<string, number>()
   let id = 0
   // the offset of the bot's last getUpdates (taken()), and when it asked for
   // updates first (until())
@@ -90,12 +94,23 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
         title: body.title,
         performer: body.performer,
         duration: body.duration === undefined ? undefined : Number(body.duration),
+        at: Date.now(),
       }
       calls.push(call)
       const ms = delay(call)
       if (typeof ms !== 'number') await ms
       else if (ms) await Bun.sleep(ms)
-      if (method === 'answerGuestQuery') return ok({ inline_message_id: `g${++id}` })
+      // Telegram stops taking an answer to a guest message after a while it
+      // doesn't say: here once it was sent over a minute ago
+      const asked = dates.get(body.guest_query_id)
+      if (method === 'answerGuestQuery' && asked !== undefined && Date.now() / 1000 - asked > 60)
+        return Response.json({
+          ok: false,
+          error_code: 400,
+          description: 'Bad Request: query is too old and response timeout expired or query ID is invalid',
+        })
+      // an answer's inline is the reply it posts
+      if (method === 'answerGuestQuery') return ok({ inline_message_id: (call.inline = `g${++id}`) })
       if (method === 'sendMessage') return ok({ message_id: ++id, date: 0, chat, text: body.text })
       // cached file_ids "unsized…" went out without a size, as before #281,
       // and "dead…" ones are gone from Telegram's servers; unique = the
@@ -141,6 +156,9 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
       PROMO_TOKEN: '',
       FAKE_MP4: mp4,
       GATES: gates,
+      // a guest message's answer waits for the test's timeUp(), not for
+      // GUEST_WAIT_MS ('' gives the bot its timer back)
+      GUEST_GATES: gates,
       ...env,
     },
     stdout: 'pipe',
@@ -236,8 +254,18 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     // a link alone), or about its own video of v: 'forward' is that video
     // forwarded, 'reply' a plain reply to it ("lol"), which Telegram calls
     // the bot on as well, 'mention' the bot mentioned in reply to it. With
-    // link, the reply carries that link of its own after its words.
-    guest(user: number, v: string, about?: 'forward' | 'reply' | 'mention', link?: string) {
+    // link, the reply carries that link of its own after its words. It's
+    // sent now, or at date (in s): a plain reply's answer waits for the
+    // test's timeUp() at the latest (or GUEST_WAIT_MS after date, with
+    // GUEST_GATES '').
+    guest(
+      user: number,
+      v: string,
+      about?: 'forward' | 'reply' | 'mention',
+      link?: string,
+      date = Math.floor(Date.now() / 1000),
+    ) {
+      dates.set(`q${user}`, date)
       const { text, entities, ...m } = message(user, v)
       // words, then a url entity for url
       const say = (words: string, url?: string) => {
@@ -249,6 +277,7 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
         update_id: updates.length + 1,
         guest_message: {
           ...m,
+          date,
           ...(about === 'forward'
             ? { ...sent(v), ...forwarded }
             : about === 'reply'
@@ -278,6 +307,17 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
         },
       } as { update_id: number })
     },
+    // what the reply to user's guest message (query q<user>) showed, in order:
+    // the answer's text, then each edit's, 'video' for the video edited in;
+    // nothing without an answer
+    reply(user: number) {
+      const answer = calls.find((c) => c.query === `q${user}` && c.inline)
+      return answer
+        ? calls
+            .filter((c) => c.inline === answer.inline)
+            .map((c) => (c.method === 'editMessageMedia' ? 'video' : c.text!))
+        : []
+    },
     // a command ("/start <payload>") from user in a private chat
     command(user: number, text: string) {
       updates.push({
@@ -292,8 +332,6 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
         },
       } as { update_id: number })
     },
-    // the status texts the guest replies got
-    inline: () => calls.filter((c) => c.inline && c.method === 'editMessageText').map((c) => c.text!),
     // Waits for done() to hold, ms of wall-clock time at most, counted from
     // the bot's first getUpdates at the earliest: on a busy runner its start
     // alone (Bun's, the fake yt-dlp's self-update, getMe) has taken over 15
@@ -341,10 +379,10 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     // the status texts a chat got, sent or edited
     statuses: (chat: number) =>
       calls.filter((c) => c.chat === chat && /^(sendMessage|editMessageText)$/.test(c.method)).map((c) => c.text!),
-    // whether a "jhold" link's -J or a "dhold" link's download is held, and
-    // lets it go on (test/yt-dlp)
-    held: (v: string, what: 'J' | 'dl') => existsSync(join(gates, `${v}.${what}.held`)),
-    release(v: string, what: 'J' | 'dl') {
+    // whether a "jhold" link's -J, a "dhold" link's download or an "lhold"
+    // link's check (--list-extractors) is held, and lets it go on (test/yt-dlp)
+    held: (v: string, what: 'J' | 'dl' | 'L') => existsSync(join(gates, `${v}.${what}.held`)),
+    release(v: string, what: 'J' | 'dl' | 'L') {
       writeFileSync(join(gates, `${v}.${what}`), '')
     },
     // whether the bot has taken every update so far: grammY asks for the ones
@@ -352,6 +390,16 @@ function start(env: Record<string, string> = {}, delay: (call: Call) => number |
     // private chat is in deliver() (requested() has nothing to check there,
     // so handle() starts before grammY goes on)
     taken: () => offset > updates.length,
+    // whether the answer to user's guest message (query q<user>) waits for
+    // the test (GUEST_GATES), and its time being up, which ends that wait as
+    // GUEST_WAIT_MS would (the bot stops waiting once it sees it: waits() is
+    // false then)
+    waits: (user: number) => existsSync(join(gates, `q${user}.held`)),
+    timeUp(user: number) {
+      writeFileSync(join(gates, `q${user}`), '')
+    },
+    // the bot's job log lines so far
+    jobs: () => lines.filter((l) => l.startsWith('job ')),
     // a deploy's SIGTERM; resolves once the drain has begun, and with
     // CUT_MS=0 (DEPLOY) once it has cut
     async term() {
@@ -642,24 +690,34 @@ test.skipIf(skip)(
 )
 
 test.skipIf(skip)(
-  "bot: in a chat it isn't in, a plain reply to its video or the video forwarded gets no answer, a mention in reply the help",
+  "bot: in a chat it isn't in, a plain reply to its video or the video forwarded gets no answer, a mention in reply the help; without a storage chat, a plain reply with a video's link gets none either, a mention with one the failure",
   async () => {
+    // (no STORAGE_CHAT or ADMIN_ID: guest downloads fail)
     const bot = start()
     let jobs: string[] = []
     try {
-      // (users other than 1, the bot's own id)
-      bot.guest(2, 'short2', 'reply')
+      // (users other than 1, the bot's own id) The plain reply was sent 40 s
+      // ago, its time up: one that asked for something would be answered at
+      // once, so only its asking for nothing keeps it unanswered
+      bot.guest(2, 'short2', 'reply', undefined, Math.floor(Date.now() / 1000) - 40)
       bot.guest(3, 'short3', 'forward')
-      // once the mention's answer is out, the others have been handled
+      bot.guest(5, 'short5', 'reply', 'https://www.youtube.com/watch?v=video5')
+      // once the mentions' answers are out, the others have been handled
+      // (the drain lets every handler finish, so whatever the plain reply
+      // with a link was going to say is in by then too)
       bot.guest(4, 'short4', 'mention')
-      await bot.until(() => bot.calls.some((c) => c.query === 'q4'))
+      bot.guest(6, 'video6')
+      await bot.until(() => bot.reply(4).length > 0 && bot.reply(6).includes(t('en', 'failed')))
     } finally {
       jobs = await bot.stop()
     }
-    // no answer, edit or message for the first two (methods and texts only:
-    // a failing toEqual on the calls would print an upload's every byte)
-    const theirs = bot.calls.filter((c) => c.query || c.inline || [2, 3, 4].includes(c.chat))
-    expect(theirs.map((c) => [c.query, c.method, c.text])).toEqual([['q4', 'answerGuestQuery', t('en', 'help')]])
+    // no answer, edit or message for the plain replies and the forward
+    // (methods and texts only: a failing toEqual on the calls would print an
+    // upload's every byte)
+    expect(bot.calls.filter((c) => c.query).map((c) => c.query).sort()).toEqual(['q4', 'q6'])
+    expect(bot.calls.filter((c) => [2, 3, 4, 5, 6].includes(c.chat)).map((c) => [c.chat, c.method])).toEqual([])
+    expect(bot.reply(4)).toEqual([t('en', 'help')])
+    expect(bot.reply(6)).toEqual([t('en', 'downloading'), t('en', 'failed')])
     expect(bot.videos()).toHaveLength(0)
     expect(jobs).toHaveLength(0)
   },
@@ -667,42 +725,516 @@ test.skipIf(skip)(
 )
 
 test.skipIf(skip)(
-  "bot: in a chat it isn't in, a link in a plain reply to its video is only a request on a video site, any link with a mention",
+  "bot: in a chat it isn't in, a plain reply to its video is only answered once its own link has a video, a mention at once",
   async () => {
     const bot = start({ STORAGE_CHAT: '9' })
     let jobs: string[] = []
+    const [downloading, uploading, failed] = (['downloading', 'uploading', 'failed'] as const).map((k) => t('en', k))
     // a page no site's extractor claims, and where -J finds no video (test/yt-dlp)
     const article = 'https://example.com/article'
+    // a page YouTube's extractor claims where -J finds no video either, as on
+    // a tweet without one (test/yt-dlp)
+    const tweet = 'https://www.youtube.com/watch?v=tweet5'
+    // a YouTube video that's unavailable: a real failure (test/yt-dlp)
+    const unavailable = 'https://www.youtube.com/watch?v=fail7'
+    // a page YouTube's extractor claims where -J finds a news article without
+    // media, an empty playlist (test/yt-dlp): no video, as on a BBC or CNN
+    // article, and no tweet, whose failure is never told anyway
+    const news = 'https://www.youtube.com/watch?v=news11'
     try {
       // (these come from private chats, see guest(): a guest message is
       // checked there as in a group all the same)
-      bot.guest(2, 'short2', 'reply', article)
-      bot.guest(3, 'short3', 'reply', 'https://www.youtube.com/watch?v=short5')
+      // The mentions first, a -J turn each (MAX_DOWNLOADS=2, so the third
+      // mention comes once the others are over): with the plain replies'
+      // jobs below they might wait for one, and show "In the queue". The
+      // plain replies with the tweet and the news article below then get a
+      // -J of their own rather than those mentions'.
+      bot.guest(6, 'short6', 'mention', tweet)
       bot.guest(4, 'short4', 'mention', article)
-      // the YouTube video is edited in, and the mention hears the article has none
+      await bot.until(() => bot.reply(6).includes(failed) && bot.reply(4).includes(failed))
+      bot.guest(10, 'short10', 'mention', news)
+      await bot.until(() => bot.reply(10).includes(failed))
+      bot.guest(2, 'short2', 'reply', article)
+      bot.guest(5, 'short5', 'reply', tweet)
+      bot.guest(11, 'short11', 'reply', news)
+      bot.guest(3, 'short3', 'reply', 'https://www.youtube.com/watch?v=video3')
+      bot.guest(7, 'short7', 'reply', unavailable)
+      // the YouTube video is edited in, the unavailable video's plain reply
+      // hears it's unavailable, and the -J of the tweet's and the news
+      // article's plain replies has found no video (their job lines, after
+      // the mentions' two)
       await bot.until(
-        () => bot.calls.some((c) => c.method === 'editMessageMedia') && bot.inline().includes(t('en', 'failed')),
+        () =>
+          bot.reply(3).includes('video') &&
+          bot.reply(7).includes(failed) &&
+          bot.jobs().filter((l) => l.startsWith('job fail:quiet host=www.youtube.com ')).length === 4,
       )
+      // Another link to the video that went out (the stand-in's id is v=):
+      // its -J finds that video, whose copy cached under its id goes out with
+      // no status from the job
+      bot.guest(8, 'short8', 'reply', 'https://www.youtube.com/watch?v=video3&t=1')
+      await bot.until(() => bot.reply(8).includes('video'))
     } finally {
-      // the drain lets every handler finish, so whatever the article's plain
-      // reply was going to say is in by then
+      // the drain lets every handler finish, so whatever the plain replies
+      // without a video were going to say is in by then
       jobs = await bot.stop()
     }
-    // no answer for the article's plain reply (methods and texts only: a
-    // failing toEqual on the calls would print an upload's every byte)
-    const answers = bot.calls.filter((c) => c.query).map((c) => [c.query, c.method, c.text])
-    expect(answers.sort()).toEqual([
-      ['q3', 'answerGuestQuery', t('en', 'downloading')],
-      ['q4', 'answerGuestQuery', t('en', 'downloading')],
-    ])
-    // the YouTube link's video went out (through the storage chat), the
-    // article's one job found nothing
-    expect(bot.videos().map((v) => v.chat)).toEqual([9])
-    expect(bot.calls.filter((c) => c.method === 'editMessageMedia')).toHaveLength(1)
+    // The mentions are answered at once, then hear the page has no video. The
+    // YouTube video's plain reply is answered once -J has found it, which is
+    // then edited in, and the other plain replies get no answer: the
+    // article's link isn't checked, the tweet's page and the news article
+    // have no video. (Texts only: a failing toEqual on the calls would print
+    // an upload's every byte.)
+    expect(bot.reply(6)).toEqual([downloading, failed])
+    expect(bot.reply(4)).toEqual([downloading, failed])
+    expect(bot.reply(10)).toEqual([downloading, failed])
+    expect(bot.reply(3)).toEqual([downloading, uploading, 'video'])
+    // The unavailable video's plain reply is answered with the failure, as a
+    // group hears it; the other link to the cached video is answered once
+    // that copy has gone out, which is then edited in
+    expect(bot.reply(7)).toEqual([failed])
+    expect(bot.reply(8)).toEqual([downloading, 'video'])
+    expect(bot.calls.filter((c) => c.query).map((c) => c.query).sort()).toEqual(['q10', 'q3', 'q4', 'q6', 'q7', 'q8'])
+    // the YouTube link's video went out (through the storage chat), then its
+    // cached copy for the other link; the article's one job, the tweet's two
+    // and the news article's two found nothing
+    expect(bot.videos().map((v) => v.chat)).toEqual([9, 9])
+    expect(bot.calls.filter((c) => c.method === 'editMessageMedia')).toHaveLength(2)
     expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' ')).sort()).toEqual([
+      'cached host=www.youtube.com',
+      'fail:failed host=www.youtube.com',
       'fail:quiet host=example.com',
+      'fail:quiet host=www.youtube.com',
+      'fail:quiet host=www.youtube.com',
+      'fail:quiet host=www.youtube.com',
+      'fail:quiet host=www.youtube.com',
       'ok host=www.youtube.com',
     ])
+  },
+  // four until()s: the first 25 s at most (it may count the bot's start),
+  // the others 15 s each
+  80_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a plain reply whose link still waits for -J when the answer can't wait any longer is answered then",
+  async () => {
+    // (each plain reply's answer waits until the test says its time is up:
+    // timeUp(), GUEST_GATES)
+    const bot = start({ STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    const [downloading, queued, uploading, failed] = (['downloading', 'queued', 'uploading', 'failed'] as const).map(
+      (k) => t('en', k),
+    )
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    try {
+      // both -J turns (MAX_DOWNLOADS=2) held: a page without a video's and a
+      // video's
+      bot.guest(10, 'short10', 'reply', link('jholdtweet10'))
+      bot.guest(11, 'short11', 'reply', link('jholdvideo11'))
+      await bot.until(
+        () => bot.held('jholdtweet10', 'J') && bot.held('jholdvideo11', 'J') && bot.waits(10) && bot.waits(11),
+      )
+      // A mention of a third video, whose download is held too, waits for a
+      // turn: it's answered at once, then hears it's queued
+      bot.guest(14, 'jholddholdvideo12')
+      await bot.until(() => bot.reply(14).includes(queued))
+      // Plain replies with that link follow the mention's job, which tells
+      // each it's queued as it's handled (a job of its own would only tell it
+      // after a step the test can't see)
+      bot.guest(12, 'short12', 'reply', link('jholddholdvideo12'))
+      bot.guest(15, 'short15', 'reply', link('jholddholdvideo12'))
+      await bot.until(() => bot.waits(12) && bot.waits(15))
+      // nothing is answered before its time is up
+      expect([10, 11, 12, 15].map((user) => bot.reply(user))).toEqual([[], [], [], []])
+      // then each is answered with where its job is
+      for (const user of [10, 11, 12]) bot.timeUp(user)
+      await bot.until(() => [10, 11, 12].every((user) => bot.reply(user).length > 0))
+      bot.release('jholdtweet10', 'J')
+      bot.release('jholdvideo11', 'J')
+      // a freed turn goes to the third link, whose download begins: that
+      // answers the reply whose time isn't up yet
+      await bot.until(() => bot.held('jholddholdvideo12', 'J'))
+      bot.release('jholddholdvideo12', 'J')
+      await bot.until(() => bot.held('jholddholdvideo12', 'dl') && bot.reply(15).length > 0)
+      // its time being up now changes nothing: it has its answer
+      bot.timeUp(15)
+      await bot.until(() => !bot.waits(15))
+      bot.release('jholddholdvideo12', 'dl')
+      await bot.until(
+        () => bot.reply(10).includes(failed) && [11, 12, 14, 15].every((user) => bot.reply(user).includes('video')),
+      )
+      // a plain reply whose link's video is cached gets it at once, no -J needed
+      bot.guest(13, 'short13', 'reply', link('jholdvideo11'))
+      await bot.until(() => bot.reply(13).includes('video'))
+    } finally {
+      jobs = await bot.stop()
+    }
+    // The page without a video hears so, as after a mention; the videos go on
+    // as after one (the job's own "Downloading…" leaves the answer's be), and
+    // the mention shows the wait for a turn
+    expect(bot.reply(10)).toEqual([downloading, failed])
+    expect(bot.reply(11)).toEqual([downloading, uploading, 'video'])
+    expect(bot.reply(14)).toEqual([downloading, queued, downloading, uploading, 'video'])
+    expect(bot.reply(12)).toEqual([queued, downloading, uploading, 'video'])
+    // answered by the download, then its time up: no "In the queue" after
+    expect(bot.reply(15)).toEqual([downloading, uploading, 'video'])
+    expect(bot.reply(13)).toEqual([downloading, 'video'])
+    // the two videos uploaded to the storage chat, and the copies sent there:
+    // the second one's for each reply following its job, the cached one's
+    expect(bot.videos().map((v) => [v.chat, v.upload]).sort()).toEqual([
+      [9, false],
+      [9, false],
+      [9, false],
+      [9, true],
+      [9, true],
+    ])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' ')).sort()).toEqual([
+      'fail:quiet host=www.youtube.com',
+      'ok host=www.youtube.com',
+      'ok host=www.youtube.com',
+    ])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a plain reply whose page has no video stays unanswered past the time its answer could wait",
+  async () => {
+    const bot = start({ STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    try {
+      // A tweet without a video, whose -J fails at once, and a video whose -J
+      // is held (a -J turn each): the tweet's job is over, the video's waits
+      bot.guest(5, 'short5', 'reply', link('tweet5'))
+      bot.guest(6, 'short6', 'reply', link('jholdvideo6'))
+      await bot.until(() => bot.jobs().length === 1 && bot.held('jholdvideo6', 'J') && bot.waits(6))
+      // then both their times are up: once the bot has stopped waiting for
+      // both, the video's reply is answered, the tweet's isn't
+      bot.timeUp(5)
+      bot.timeUp(6)
+      await bot.until(() => !bot.waits(5) && bot.reply(6).length > 0)
+      bot.release('jholdvideo6', 'J')
+      await bot.until(() => bot.reply(6).includes('video'))
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.calls.filter((c) => c.query).map((c) => c.query)).toEqual(['q6'])
+    expect(bot.reply(6)).toEqual([t('en', 'downloading'), t('en', 'uploading'), 'video'])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' ')).sort()).toEqual([
+      'fail:quiet host=www.youtube.com',
+      'ok host=www.youtube.com',
+    ])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a plain reply is answered at once when the bot has its video or its time is up already, and gets no job when that answer comes too late",
+  async () => {
+    // old20 has a copy cached under its link and id from before videos went
+    // out with their size (#281), which the fake Bot API resends without
+    // one: it's downloaded again to replace that copy
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const link = (v: string) => `https://www.youtube.com/watch?v=${v}`
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    for (const key of [link('jholdold20'), 'Youtube:jholdold20'])
+      db.run("INSERT INTO files VALUES (?, 'video', 'unsized20', 'Video', ?)", [key, link('jholdold20')])
+    db.close()
+    const bot = start({ STORAGE_CHAT: '9', DATA_DIR: data })
+    let jobs: string[] = []
+    const [downloading, uploading] = (['downloading', 'uploading'] as const).map((k) => t('en', k))
+    const now = Math.floor(Date.now() / 1000)
+    try {
+      // The cached video, whose download again holds its -J; a video sent
+      // 40 s ago, past the 30 s its answer may wait, whose -J is held too;
+      // and one sent 10 minutes ago, too long for Telegram to take its answer
+      bot.guest(20, 'short20', 'reply', link('jholdold20'))
+      bot.guest(21, 'short21', 'reply', link('jholdvideo21'), now - 40)
+      bot.guest(22, 'short22', 'reply', link('video22'), now - 600)
+      // the first two are answered while their -J runs, and the third tried
+      await bot.until(
+        () =>
+          bot.held('jholdold20', 'J') &&
+          bot.held('jholdvideo21', 'J') &&
+          [20, 21].every((user) => bot.reply(user).length > 0) &&
+          bot.calls.some((c) => c.query === 'q22'),
+      )
+      bot.release('jholdold20', 'J')
+      bot.release('jholdvideo21', 'J')
+      await bot.until(() => [20, 21].every((user) => bot.reply(user).includes('video')))
+    } finally {
+      jobs = await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // The download again shows nothing until its video is edited in, the
+    // other video goes on as after a mention
+    expect(bot.reply(20)).toEqual([downloading, 'video'])
+    expect(bot.reply(21)).toEqual([downloading, uploading, 'video'])
+    // The late one's answer was refused, and no job ran for it: the two are
+    // the cached video's and the other one's
+    expect(bot.calls.filter((c) => c.query === 'q22').map((c) => [c.method, c.inline])).toEqual([
+      ['answerGuestQuery', undefined],
+    ])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' '))).toEqual(['ok host=www.youtube.com', 'ok host=www.youtube.com'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: on a deploy, a guest reply that doesn't mention the bot and has no answer yet gets none when its time runs out in the drain",
+  async () => {
+    // The drain alone, not DEPLOY's cut at once: the cut is 598 s away, so
+    // it's the drain having begun that keeps the reply unanswered, as in the
+    // 13 s between the two in production
+    const bot = start({ DRAIN_MS: '600000', STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    try {
+      // a page without a video, whose -J is held through the drain's start
+      // and until the bot has stopped waiting for the reply's answer, its
+      // time up
+      bot.guest(30, 'short30', 'reply', 'https://www.youtube.com/watch?v=jholdtweet30')
+      await bot.until(() => bot.held('jholdtweet30', 'J') && bot.waits(30))
+      await bot.term()
+      bot.timeUp(30)
+      await bot.until(() => !bot.waits(30))
+      bot.release('jholdtweet30', 'J')
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.calls.filter((c) => c.query || c.inline).map((c) => c.method)).toEqual([])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' '))).toEqual(['fail:quiet host=www.youtube.com'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: on a deploy, a guest reply that doesn't mention the bot and whose time ran out while its link was checked isn't answered at once once the drain has begun",
+  async () => {
+    // the drain alone, as above
+    const bot = start({ DRAIN_MS: '600000', STORAGE_CHAT: '9' })
+    const v = 'lholdjholdtweet31'
+    let jobs: string[] = []
+    try {
+      // Sent 40 s ago, so its time is up; its link's check (--list-extractors)
+      // is held until the drain has begun, then its -J, of a page without a
+      // video, until its time being up has been dealt with
+      bot.guest(31, 'short31', 'reply', `https://www.youtube.com/watch?v=${v}`, Math.floor(Date.now() / 1000) - 40)
+      await bot.until(() => bot.held(v, 'L'))
+      await bot.term()
+      bot.release(v, 'L')
+      // It waits for -J as one with time left does, and its time being up
+      // (the timer fires at once in production) answers nothing either
+      await bot.until(() => bot.held(v, 'J'))
+      expect(bot.waits(31)).toBe(true)
+      bot.timeUp(31)
+      await bot.until(() => !bot.waits(31))
+      bot.release(v, 'J')
+    } finally {
+      // a failed check above mustn't keep the drain waiting for its handler
+      bot.release(v, 'L')
+      bot.release(v, 'J')
+      jobs = await bot.stop()
+    }
+    expect(bot.calls.filter((c) => c.query || c.inline).map((c) => c.method)).toEqual([])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' '))).toEqual(['fail:quiet host=www.youtube.com'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: on a deploy, a guest reply that doesn't mention the bot and has no answer yet gets none when its -J finds a video after the cut",
+  async () => {
+    const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    try {
+      // a short video, whose -J is held until the cut has come
+      bot.guest(40, 'short40', 'reply', 'https://www.youtube.com/watch?v=jholdvideo40')
+      await bot.until(() => bot.held('jholdvideo40', 'J') && bot.waits(40))
+      await bot.term()
+      bot.release('jholdvideo40', 'J')
+      // a free slot still takes it, and it downloads; past the cut no upload
+      // begins, so its job ends there
+      await bot.until(() => bot.jobs().length === 1)
+    } finally {
+      bot.release('jholdvideo40', 'J')
+      jobs = await bot.stop()
+    }
+    // no "Downloading…" that could only lead to "send the link again", as a
+    // group message that didn't mention the bot gets none
+    expect(bot.calls.filter((c) => c.query || c.inline).map((c) => c.method)).toEqual([])
+    expect(bot.videos()).toHaveLength(0)
+    expect(jobs.filter((l) => /^job fail:restarting .* dl=/.test(l))).toHaveLength(1)
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: on a deploy, before the cut, a guest reply that doesn't mention the bot is answered once its -J finds a short video, and gets it",
+  async () => {
+    // The drain alone: the cut is 598 s away, so the download can still be
+    // uploaded, and the reply shows its progress as before the drain
+    const bot = start({ DRAIN_MS: '600000', STORAGE_CHAT: '9' })
+    try {
+      bot.guest(41, 'short41', 'reply', 'https://www.youtube.com/watch?v=jholdvideo41')
+      await bot.until(() => bot.held('jholdvideo41', 'J') && bot.waits(41))
+      await bot.term()
+      bot.release('jholdvideo41', 'J')
+      await bot.until(() => bot.reply(41).includes('video'))
+    } finally {
+      bot.release('jholdvideo41', 'J')
+      await bot.stop()
+    }
+    expect(bot.reply(41)).toEqual([t('en', 'downloading'), t('en', 'uploading'), 'video'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: on a deploy, past the cut, a guest reply that doesn't mention the bot whose -J finds a video cached under its id is answered and gets it",
+  async () => {
+    const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    try {
+      // the video goes out first, so it's cached under its id
+      bot.guest(42, 'short42', 'reply', 'https://www.youtube.com/watch?v=video42')
+      await bot.until(() => bot.reply(42).includes('video'))
+      // another link to it (the stand-in's id is v=), whose -J is held until
+      // the cut has come; its copy still goes out, so it's answered
+      bot.guest(43, 'short43', 'reply', 'https://www.youtube.com/watch?v=video42&t=jhold')
+      await bot.until(() => bot.held('video42', 'J') && bot.waits(43))
+      await bot.term()
+      bot.release('video42', 'J')
+      await bot.until(() => bot.reply(43).includes('video'))
+    } finally {
+      bot.release('video42', 'J')
+      jobs = await bot.stop()
+    }
+    expect(bot.reply(43)).toEqual([t('en', 'downloading'), 'video'])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' '))).toEqual([
+      'ok host=www.youtube.com',
+      'cached host=www.youtube.com',
+    ])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, the time a plain reply's answer may wait counts from when it was sent",
+  async () => {
+    // the bot's own timer, GUEST_WAIT_MS's default of 30 s
+    const bot = start({ STORAGE_CHAT: '9', GUEST_GATES: '' })
+    let jobs: string[] = []
+    let date = 0
+    try {
+      // The bot is up first (a private link has gone out), so the time its
+      // start takes can't pass for the reply's wait
+      bot.link(1, 'short1')
+      await bot.until(() => bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage'))
+      // sent 25 s ago (in whole seconds), its -J held: its answer can wait
+      // 4-5 s more, not 30
+      date = Math.floor(Date.now() / 1000) - 25
+      bot.guest(23, 'short23', 'reply', 'https://www.youtube.com/watch?v=jholdvideo23', date)
+      await bot.until(() => bot.reply(23).length > 0)
+      bot.release('jholdvideo23', 'J')
+      await bot.until(() => bot.reply(23).includes('video'))
+    } finally {
+      jobs = await bot.stop()
+    }
+    // answered once its 30 s since it was sent were up: not at once on
+    // handling (as with a shorter wait), nor a whole GUEST_WAIT_MS after it
+    // (counted from handling, not from its date). A timer may fire a ms early.
+    const late = bot.calls.find((c) => c.query === 'q23')!.at - (date * 1000 + 30_000)
+    expect(late).toBeGreaterThanOrEqual(-10)
+    expect(late).toBeLessThan(10_000)
+    expect(bot.reply(23)).toEqual([t('en', 'downloading'), t('en', 'uploading'), 'video'])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' '))).toEqual([
+      'ok host=www.youtube.com',
+      'ok host=www.youtube.com',
+    ])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a plain reply whose answer Telegram no longer takes when the download begins still gets its job done, and the bot goes on",
+  async () => {
+    // Sent 62 s ago, while its answer may still wait (GUEST_WAIT_MS): the
+    // fake Bot API takes no answer to a guest message sent over a minute ago.
+    // Its time never runs out here (GUEST_GATES), so the answer it first gets
+    // is its job's "Downloading…".
+    const bot = start({ STORAGE_CHAT: '9', GUEST_WAIT_MS: '120000' })
+    let jobs: string[] = []
+    try {
+      bot.guest(24, 'short24', 'reply', 'https://www.youtube.com/watch?v=video24', Math.floor(Date.now() / 1000) - 62)
+      // the video goes up to the storage chat all the same, then is deleted there
+      await bot.until(() => bot.calls.some((c) => c.method === 'deleteMessage' && c.chat === 9))
+      expect(bot.running()).toBe(true)
+    } finally {
+      jobs = await bot.stop()
+    }
+    // the answer was refused, so there's no reply to edit
+    expect(bot.calls.filter((c) => c.query || c.inline).map((c) => [c.method, c.inline])).toEqual([
+      ['answerGuestQuery', undefined],
+    ])
+    expect(bot.videos().map((v) => [v.chat, v.upload])).toEqual([[9, true]])
+    expect(jobs.map((l) => l.split(' ').slice(1, 3).join(' '))).toEqual(['ok host=www.youtube.com'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a plain reply's job goes on to its upload while its answer is still on its way, as in a flood wait",
+  async () => {
+    // the answer waits until the test lets it go
+    const answer = gate()
+    const bot = start({ STORAGE_CHAT: '9' }, (c) => (c.method === 'answerGuestQuery' ? answer : 0))
+    try {
+      bot.guest(26, 'short26', 'reply', 'https://www.youtube.com/watch?v=video26')
+      // the job doesn't wait for it (nor hold its slot meanwhile): the video
+      // goes up to the storage chat
+      await bot.until(() => bot.calls.some((c) => c.query === 'q26') && bot.videos().some((v) => v.chat === 9))
+      answer.open()
+      await bot.until(() => bot.reply(26).includes('video'))
+    } finally {
+      answer.open()
+      await bot.stop()
+    }
+    // the edits waited for the answer
+    expect(bot.reply(26)).toEqual([t('en', 'downloading'), t('en', 'uploading'), 'video'])
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: in a chat it isn't in, a plain reply that comes while another process holds the database's lock is answered once its video is found, as any other",
+  async () => {
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = new Database(join(data, 'bot.sqlite'))
+    const bot = start({ STORAGE_CHAT: '9', DATA_DIR: data })
+    try {
+      // up, past the tables set up at start, and done writing: its first
+      // link's video is out and cached
+      bot.link(1, 'short1')
+      await bot.until(() => bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage'))
+      // The lock another process's commit holds, which fails the bot's reads
+      // too: each of the cache's that the reply's link meets (whether the bot
+      // has a copy, before it's answered, and the job's) counts as a miss
+      db.run('BEGIN EXCLUSIVE')
+      bot.guest(25, 'short25', 'reply', 'https://www.youtube.com/watch?v=video25')
+      await bot.until(() => bot.reply(25).length > 0)
+      db.run('ROLLBACK')
+      await bot.until(() => bot.reply(25).includes('video'))
+      expect(bot.running()).toBe(true)
+    } finally {
+      if (db.inTransaction) db.run('ROLLBACK')
+      db.close()
+      await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    expect(bot.reply(25)).toEqual([t('en', 'downloading'), t('en', 'uploading'), 'video'])
   },
   30_000,
 )
@@ -1282,7 +1814,7 @@ test.skipIf(skip)(
     let jobs: string[] = []
     try {
       bot.guest(1, 'dholdshort1')
-      await bot.until(() => bot.inline().length > 0)
+      await bot.until(() => bot.held('dholdshort1', 'dl') && bot.reply(1).length > 0)
       // the cut comes while it downloads, the download ends after it
       await bot.term()
       bot.release('dholdshort1', 'dl')
@@ -1291,7 +1823,7 @@ test.skipIf(skip)(
     }
     // the cut doesn't tell a guest reply, its job's end does, with nothing
     // uploaded to the storage chat
-    expect(bot.inline().map((s) => [...s][0])).toEqual(['⏬', '⏫', '🔄'])
+    expect(bot.reply(1).map((s) => [...s][0])).toEqual(['⏬', '⏫', '🔄'])
     expect(bot.videos()).toHaveLength(0)
     expect(jobs.filter((l) => /^job fail:restarting .* dl=/.test(l))).toHaveLength(1)
   },
@@ -1354,6 +1886,32 @@ test.skipIf(skip)(
     expect(cached[link('short3')]).toBe(cached['Youtube:short3'])
     expect(cached[link('short3&t=1')]).toBeUndefined()
     expect(cached[link('short3&t=2')]).toBe('cached3')
+  },
+  30_000,
+)
+
+test.skipIf(skip)(
+  "bot: on a deploy, the drain waits for a guest reply's notice to send the link again while it's on its way",
+  async () => {
+    // the notice waits until the test lets it go
+    const notice = gate()
+    const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' }, (c) => (c.inline && c.text?.startsWith('🔄') ? notice : 0))
+    try {
+      bot.guest(1, 'dholdshort1')
+      await bot.until(() => bot.held('dholdshort1', 'dl') && bot.reply(1).length > 0)
+      await bot.term()
+      bot.release('dholdshort1', 'dl')
+      await bot.until(() => bot.reply(1).some((s) => s.startsWith('🔄')))
+      // its handler waits for the notice, and the drain (600 s) for the
+      // handler: the bot is still up a second later (one whose handler
+      // didn't wait would have exited by then)
+      await Bun.sleep(1000)
+      expect(bot.running()).toBe(true)
+    } finally {
+      notice.open()
+      await bot.stop()
+    }
+    expect(bot.reply(1).map((s) => [...s][0])).toEqual(['⏬', '⏫', '🔄'])
   },
   30_000,
 )
@@ -1558,9 +2116,7 @@ test.skipIf(skip)(
       db.run('BEGIN EXCLUSIVE')
       bot.guest(1, 'short1')
       // its video is edited into the guest reply, or the reply says it failed
-      await bot.until(
-        () => bot.calls.some((c) => c.method === 'editMessageMedia') || bot.inline().includes(t('en', 'failed')),
-      )
+      await bot.until(() => bot.reply(1).includes('video') || bot.reply(1).includes(t('en', 'failed')))
     } finally {
       jobs = await bot.stop()
       if (db.inTransaction) db.run('ROLLBACK')
@@ -1574,7 +2130,7 @@ test.skipIf(skip)(
       [9, true],
     ])
     expect(bot.calls.filter((c) => c.method === 'editMessageMedia')).toHaveLength(1)
-    expect(bot.inline().map((s) => [...s][0])).toEqual(['⏬', '⏫'])
+    expect(bot.reply(1)).toEqual([t('en', 'downloading'), t('en', 'uploading'), 'video'])
     expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['ok', 'ok'])
   },
   30_000,

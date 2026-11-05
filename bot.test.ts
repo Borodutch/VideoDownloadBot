@@ -7,6 +7,7 @@ import {
   answer,
   biggest,
   claims,
+  deadline,
   downloadMinutes,
   drop,
   Fail,
@@ -34,6 +35,7 @@ import {
   tellQueued,
   THUMB,
   Timeout,
+  unasked,
   unready,
   unsend,
   unstarted,
@@ -372,6 +374,41 @@ test('answer: groups only hear about real failures unless they asked', () => {
   // a tweet without a video gets no answer, not even when asked
   const tweet = 'ERROR: [twitter] 2115252259521233154: No video could be found in this tweet'
   expect(answer(notVideo(tweet) ? null : 'failed', 'private', true, tweet)).toBeNull()
+})
+
+test("unasked: a guest message that doesn't mention the bot, not answered yet, hears what a group would", () => {
+  // nothing about a page without a video (in any chat, a private one too:
+  // the guest message's own) or a tweet without one
+  for (const [why, ies] of empty) expect(unasked(notVideo(why, ies) ? null : 'failed', why)).toBeNull()
+  expect(unasked(key(() => picked(null)) as null)).toBeNull()
+  const tweet = 'ERROR: [twitter] 2115252259521233154: No video could be found in this tweet'
+  expect(unasked(notVideo(tweet) ? null : 'failed', tweet)).toBeNull()
+  // nor that a restart dropped its link, which may not be a video's
+  expect(unasked('restarting')).toBeNull()
+  // a video that failed, or one that can't go out, it hears about
+  for (const [why, ies] of broken) expect(unasked(notVideo(why, ies) ? null : 'failed', why)).toBe('failed')
+  expect(unasked('tooBig')).toBe('tooBig')
+  expect(unasked(unready({ is_live: true }))).toBe('live')
+})
+
+test("deadline: without GUEST_GATES it's a timer, at once when the time is up already, and never fires once called off", async () => {
+  // (bot.e2e.test.ts sets GUEST_GATES, so this is where the timer is tested)
+  const fired: string[] = []
+  const at = Date.now()
+  let soon = 0
+  deadline('q1', -1000, () => fired.push('up'))
+  deadline('q2', 50, () => {
+    soon = Date.now() - at
+    fired.push('soon')
+  })
+  // called off: a guest reply whose job ended before its time was up
+  const off = deadline('q3', 50, () => fired.push('off'))
+  off()
+  for (let i = 0; i < 300 && fired.length < 2; i++) await Bun.sleep(10)
+  // well past the time of the one called off
+  await Bun.sleep(150)
+  expect(fired).toEqual(['up', 'soon'])
+  expect(soon).toBeGreaterThanOrEqual(45)
 })
 
 test('urls: a t.me/s/ channel preview link becomes the post itself', () => {
