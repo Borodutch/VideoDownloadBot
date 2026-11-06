@@ -8,6 +8,14 @@
 
 Website: **[videodl.borodutch.com](https://videodl.borodutch.com)** (supported sites, how to use it in chats and groups, FAQ).
 
+## Questions
+
+**Can it download Instagram videos?** Yes. Send it a link to a public Instagram reel or video post and it replies with the video file. Stories and posts from private accounts need an Instagram login, so they don't work.
+
+**Which Telegram bot downloads videos from YouTube or TikTok links?** This one: paste the link into a chat with [@VideoDownloadBot](https://t.me/VideoDownloadBot). Files up to 2 GB come back as videos you can watch, save or forward, and a link the bot has seen before comes back instantly.
+
+**Is it free?** Yes. There is no paid plan and no sign-up, and the code is open source under the MIT license. Please download only videos you have the right to save.
+
 ## How it works
 
 Send it a link (or post one in a group it's in) and it replies with the video. Downloads go through [yt-dlp](https://github.com/yt-dlp/yt-dlp); every sent file's Telegram `file_id` is kept in SQLite, so the same link (or the same video under another link) is resent instantly. When Telegram's flood control holds the bot back (a 429, mostly in busy groups), it waits as long as Telegram asks and sends again, up to 5 times and 2 minutes in all, and until the flood is over its messages to that chat go one at a time (the "Downloading…"/"Uploading…" status is skipped rather than waited for), so a finished video is delayed rather than lost. Originally developed by [MaxiFilippov](https://github.com/MaxiFilippov).
