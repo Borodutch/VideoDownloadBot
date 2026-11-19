@@ -3,7 +3,8 @@
 // under the generic extractor and a YouTube one under youtube too, -J finds
 // no video on a page off YouTube (an article) and describes a YouTube link
 // (one with "long" in it is a 50-minute video, one with "slow" takes 3 s to
-// describe, one with "fail" is unavailable, one with "tweet" is a tweet without a video,
+// describe, one with "fail" is unavailable, one with "crash" dies on its own
+// (no extractor's tag on its error), one with "tweet" is a tweet without a video,
 // one with "news" is a news article without media, which BBC's or CNN's
 // extractor tells as a playlist with no entries,
 // one with "reel" in it is an Instagram reel and one with "stream" in it a
@@ -16,12 +17,14 @@
 // as yt-dlp tells one, a format "0" that says nothing else, whose link picks
 // the clip by its query, clip=<letter>; one with "multi" in it is a post, a
 // playlist of its n=<count> videos (1 without n; with "mvid" in it too, a
-// multi_video: one video in parts), as many of them as
+// multi_video: one video in parts; with "board" in it, a Pinterest board's
+// pins, which yt-dlp reads whole as well), as many of them as
 // --playlist-items (the last one) asks for: the first one's id is the
 // post's, the i-th's <id>-<i>, and the ones listed in pic=<i,...> are
 // pictures, which yt-dlp can't read: -J lists each as null, says so and
 // exits 1, with the rest; the ones in gone=<i,...> fail so too, but as a
-// video whose page couldn't be read; the ones in big=<i,...> are 3000 MB, the
+// video whose page couldn't be read; the ones in link=<i,...> are links to
+// another page, as --flat-playlist lists them; the ones in big=<i,...> are 3000 MB, the
 // ones in lengthy=<i,...> 50 minutes long (the others 30 s), the ones in
 // live=<i,...> live now, and the download of one in bad=<i,...> fails as a
 // "broken" one's does; a run with --cookies notes their file in $PAGES/<id>
@@ -160,6 +163,18 @@ if (args.includes('-J') && url.includes('fail')) {
   console.error('ERROR: [youtube] x: Video unavailable')
   process.exit(1)
 }
+// one with "crash" in it dies of something no extractor says (a full disk,
+// as yt-dlp prints an OSError), and one with "offline" in it can't get the
+// page (as when the proxy can't reach the site)
+if (args.includes('-J') && url.includes('crash')) {
+  console.error('ERROR: [Errno 28] No space left on device')
+  process.exit(1)
+}
+if (args.includes('-J') && url.includes('offline')) {
+  const why = '<urlopen error [Errno -3] Temporary failure in name resolution>'
+  console.error(`ERROR: [youtube] ${id}: Unable to download webpage: ${why} (caused by TransportError('${why}'))`)
+  process.exit(1)
+}
 if (args.includes('-J') && url.includes('tweet')) {
   console.error('ERROR: [twitter] 123: No video could be found in this tweet')
   process.exit(1)
@@ -237,20 +252,22 @@ if (args.includes('-J')) {
     const entries = items.map((i) =>
       pics.includes(i) || gone.includes(i)
         ? null
-        : {
-            ...(i === 1
-              ? shown
-              : { ...video, id: own(i), url: `https://media.example/${own(i)}/${letter}.mp4?sig=${Math.random().toString(36).slice(2)}` }),
-            ...(list('big').includes(i) ? { filesize: 3000 * 2 ** 20 } : {}),
-            ...(list('lengthy').includes(i) ? { duration: 3000 } : {}),
-            ...(list('live').includes(i) ? { live_status: 'is_live' } : {}),
-          },
+        : list('link').includes(i)
+          ? { _type: 'url', ie_key: 'Youtube', id: own(i), url: `https://www.youtube.com/watch?v=${own(i)}` }
+          : {
+              ...(i === 1
+                ? shown
+                : { ...video, id: own(i), url: `https://media.example/${own(i)}/${letter}.mp4?sig=${Math.random().toString(36).slice(2)}` }),
+              ...(list('big').includes(i) ? { filesize: 3000 * 2 ** 20 } : {}),
+              ...(list('lengthy').includes(i) ? { duration: 3000 } : {}),
+              ...(list('live').includes(i) ? { live_status: 'is_live' } : {}),
+            },
     )
     console.log(
       JSON.stringify({
         _type: url.includes('mvid') ? 'multi_video' : 'playlist',
         id,
-        extractor_key: embed ? 'Generic' : 'Twitter',
+        extractor_key: embed ? 'Generic' : url.includes('board') ? 'PinterestCollection' : 'Twitter',
         title: 'Post',
         webpage_url: url,
         entries,

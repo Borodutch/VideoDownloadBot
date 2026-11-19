@@ -35,6 +35,7 @@ import {
   selfUpdate,
   sender,
   shown,
+  sitesWord,
   sizes,
   stale,
   tellQueued,
@@ -312,6 +313,57 @@ test('notVideo: no-media pages vs failed videos', () => {
   for (const [why, ies] of broken) expect(notVideo(why, ies)).toBe(false)
 })
 
+// yt-dlp's last line for a -J that failed, as yt-dlp 2026.08 prints it (from
+// runs and from its extractors' code): the site's own word that its page has
+// nothing for the link now...
+const nothing: [string, string[]?][] = [
+  ['ERROR: [Instagram] C1: Unable to download webpage: HTTP Error 404: Not Found (caused by <HTTPError 404: Not Found>)'],
+  ['ERROR: [Instagram] C1: Unable to download webpage: HTTP Error 429: Too Many Requests (caused by <HTTPError 429: Too Many Requests>)'],
+  [
+    'ERROR: [Instagram] C1: The webpage request was redirected to the login page. You have exceeded the rate-limit for accessing posts anonymously. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies',
+  ],
+  ['ERROR: [youtube] dQw4w9WgXcQ: Video unavailable'],
+  [
+    "ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies. Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  for tips on effectively exporting YouTube cookies",
+  ],
+  ['ERROR: Unsupported URL: https://tugport.com/'],
+  ['ERROR: [generic] clip: Unable to download webpage: HTTP Error 404: Not Found (caused by <HTTPError 404: Not Found>)'],
+]
+// ...and one that says nothing about the page. yt-dlp asks to have every
+// transport error reported but a plain TransportError (it counts only that
+// one and HTTPError expected): the proxy's, TLS's and a page cut short's
+// lines are here as it prints them, and without that ask, as an extractor
+// that raises them expected would print them, so each is caught by its own
+// clause of sitesWord()
+const report =
+  '; please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template. Confirm you are on the latest version using  yt-dlp -U'
+const transport = [
+  `ERROR: [youtube] dQw4w9WgXcQ: Unable to download API page: ('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden')) (caused by ProxyError("('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden'))"))`,
+  "ERROR: [Instagram] C1: Unable to download webpage: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010) (caused by SSLError('[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010)'))",
+  "ERROR: [generic] clip: Unable to download webpage: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1082) (caused by CertificateVerifyError('[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1082)'))",
+  'ERROR: [Instagram] C1: C1: Error reading response: 1024 bytes read, 2048 more expected (caused by <IncompleteRead: 1024 bytes read, 2048 more expected>)',
+]
+const unclear: [string, string[]?][] = [
+  [
+    `ERROR: [generic] clip: Unable to download webpage: (<HTTPConnection(host='10.255.255.1', port=80) at 0x10a249fd0>, 'Connection to 10.255.255.1 timed out. (connect timeout=1.0)') (caused by TransportError("(<HTTPConnection(host='10.255.255.1', port=80) at 0x10a249fd0>, 'Connection to 10.255.255.1 timed out. (connect timeout=1.0)')"))`,
+  ],
+  ['ERROR: [youtube] dQw4w9WgXcQ: Unable to download webpage: HTTP Error 503: Service Unavailable (caused by <HTTPError 503: Service Unavailable>)'],
+  ['ERROR: [generic] clip: Unable to download webpage: HTTP Error 502: Bad Gateway (caused by <HTTPError 502: Bad Gateway>)'],
+  ...transport.flatMap((why): [string][] => [[why + report], [why]]),
+  // a bug in yt-dlp
+  ['ERROR: [youtube] dQw4w9WgXcQ: Unable to extract yt initial data' + report],
+  [crash, ['NYTimesArticle']],
+  // the disk, a geo block's tip, the time limit
+  ['ERROR: [Errno 28] No space left on device'],
+  ['You might want to use a VPN or a proxy server (with --proxy) to workaround.'],
+  ['yt-dlp timed out after 5 min'],
+]
+
+test("sitesWord: the site's own word that the page has nothing vs a failure that says nothing about it", () => {
+  for (const [why, ies] of nothing) expect([why, sitesWord(why, ies)]).toEqual([why, true])
+  for (const [why, ies] of unclear) expect([why, sitesWord(why, ies)]).toEqual([why, false])
+})
+
 const key = (f: () => unknown) => {
   try {
     f()
@@ -330,7 +382,7 @@ test('picked: nothing, empty and YouTube playlists are not a video', () => {
   expect(picked({ id: 'v', extractor_key: 'Youtube' })).toEqual({ id: 'v', extractor_key: 'Youtube' })
 })
 
-test("picks: a video alone, a post's videos each once and ALBUM at most, null for a playlist of links; nothing, an empty or YouTube playlist is no video", () => {
+test("picks: a video alone, a post's videos each once and ALBUM at most, a Pinterest board's first one, null for a playlist of links; nothing, an empty or YouTube playlist is no video", () => {
   const video = { id: 'v', extractor_key: 'Youtube' }
   expect(picks(video)).toEqual([video])
   expect(key(() => picks(null))).toBeNull()
@@ -350,6 +402,11 @@ test("picks: a video alone, a post's videos each once and ALBUM at most, null fo
   expect(picks({ _type: 'playlist', extractor_key: 'TikTokUser', entries: [link] })).toBeNull()
   expect(picks({ _type: 'playlist', extractor_key: 'Generic', entries: [item('a'), link] })).toBeNull()
   expect(picks({ _type: 'playlist', extractor_key: 'Generic', entries: [{ _type: 'playlist', id: 'p', entries: [] }] })).toBeNull()
+  // a board, whose pins yt-dlp reads whole: a list, not a post, whose first
+  // video goes alone (a picture yt-dlp couldn't read isn't one)
+  const pin = (id: string) => ({ id, extractor_key: 'Pinterest' })
+  expect(picks({ _type: 'playlist', extractor_key: 'PinterestCollection', entries: [pin('a'), pin('b')] })).toEqual([pin('a')])
+  expect(picks({ _type: 'playlist', extractor_key: 'PinterestCollection', entries: [null, pin('b')] })).toEqual([pin('b')])
   // a multi_video (one video in parts) sends its first part, as before, and
   // one whose parts --flat-playlist left links is read as before
   const part = (id: string) => ({ id, extractor_key: 'BiliBili' })
@@ -1258,13 +1315,18 @@ const items = (file: () => string | InputFile, ...kinds: ('video' | 'audio')[]) 
     opts: { caption: `c${i}`, parse_mode: 'HTML' as const, duration: 2, width: 4, height: 3, reply_parameters: { message_id: 5 }, disable_notification: false },
   }))
 
-test("album: 2-10 videos go as one album, the first one's caption, reply and notification the album's, and each file is kept", async () => {
+test("album: 2-10 videos go as one album, the first one's caption, reply and notification the album's, and each file is kept and heard", async () => {
   const fake = fakeApi(() => album('video', 3))
   try {
     const kept: string[] = []
+    const heard: [number, string][] = []
     const dest: { chat: number; sent?: number; more?: number[] } = { chat: -100 }
     const sent = await video((path) =>
-      albumSender(fake.api, sender(fake.api), (f) => kept.push(f))(dest, items(() => new InputFile(path), 'video', 'video', 'video')),
+      albumSender(fake.api, sender(fake.api), (f) => kept.push(f))(
+        dest,
+        items(() => new InputFile(path), 'video', 'video', 'video'),
+        (n, [, id]) => heard.push([n, id]),
+      ),
     )
     expect(sent.map((s) => s && [s[0], s[1]])).toEqual([
       ['video', 'video-0'],
@@ -1272,6 +1334,11 @@ test("album: 2-10 videos go as one album, the first one's caption, reply and not
       ['video', 'video-2'],
     ])
     expect([dest.sent, dest.more, kept]).toEqual([10, [11, 12], ['u0', 'u1', 'u2']])
+    expect(heard).toEqual([
+      [0, 'video-0'],
+      [1, 'video-1'],
+      [2, 'video-2'],
+    ])
     expect(fake.methods()).toEqual(['sendMediaGroup'])
     const { payload } = fake.calls[0]!
     // each file uploaded, by the field the album names it by
@@ -1344,27 +1411,41 @@ test('album: one Telegram refuses (a 400, a 413) goes file by file, each with it
   }
 })
 
-test("album: file by file, a cached file_id Telegram no longer has is left out and the others go on; a fresh file's failure fails it", async () => {
+test("album: file by file, a cached file_id Telegram no longer has is left out and the others go on; a fresh file's failure fails it, the files before it heard as they went", async () => {
   // of different kinds, so file by file: a cached video, a cached one
   // Telegram no longer has (its 2nd sendVideo) and a cached audio file
   const dead = { ok: false, error_code: 400, description: 'Bad Request: wrong file identifier/HTTP URL specified' }
   const audio = { ok: true, result: { message_id: 8, date: 0, chat: { id: -100, type: 'supergroup', title: 'g' }, audio: { file_id: 'a', file_unique_id: 'ua', duration: 1 } } }
   const fake = fakeApi((method, n) => (method === 'sendAudio' ? audio : n === 2 ? dead : sentAs('video')))
   try {
+    const heard: [number, string][] = []
     const dest: { chat: number; sent?: number; more?: number[] } = { chat: -100 }
-    const sent = await albumSender(fake.api, sender(fake.api))(dest, items(() => 'cached', 'video', 'video', 'audio'))
+    const sent = await albumSender(fake.api, sender(fake.api))(dest, items(() => 'cached', 'video', 'video', 'audio'), (n, [, id]) =>
+      heard.push([n, id]),
+    )
     expect(sent.map((s) => s && [s[0], s[1]])).toEqual([['video', 'video-id'], undefined, ['audio', 'a']])
     expect(fake.methods()).toEqual(['sendVideo', 'sendVideo', 'sendAudio'])
     expect([dest.sent, dest.more]).toEqual([7, [8]])
+    expect(heard).toEqual([
+      [0, 'video-id'],
+      [2, 'a'],
+    ])
   } finally {
     fake.stop()
   }
-  // a fresh file Telegram takes neither as a video nor as a document
+  // a fresh file Telegram takes neither as a video nor as a document, after
+  // an audio file that went out
   const refused = fakeApi((method) => (method === 'sendAudio' ? audio : dead))
   try {
-    const sent = video((path) => albumSender(refused.api, sender(refused.api))({ chat: -100 }, items(() => new InputFile(path), 'audio', 'video')))
+    const heard: [number, string][] = []
+    const sent = video((path) =>
+      albumSender(refused.api, sender(refused.api))({ chat: -100 }, items(() => new InputFile(path), 'audio', 'video'), (n, [, id]) =>
+        heard.push([n, id]),
+      ),
+    )
     await expect(sent).rejects.toMatchObject({ error_code: 400 })
     expect(refused.methods()).toEqual(['sendAudio', 'sendVideo', 'sendDocument'])
+    expect(heard).toEqual([[0, 'a']])
   } finally {
     refused.stop()
   }
@@ -1559,7 +1640,8 @@ test("progress: a 429 on it comes back at once and skips the chat's next ones, o
     // skipped while the chat is in that flood
     await progress(wait.flooded(-100), show)
     expect(fake.methods()).toEqual(['sendMessage'])
-    // after it, any other error still fails the job
+    // after it, any other error still comes back (the job logs it and goes
+    // on: download())
     await Bun.sleep(1100)
     expect(wait.flooded(-100)).toBe(false)
     await expect(progress(wait.flooded(-100), show)).rejects.toMatchObject({ error_code: 400 })

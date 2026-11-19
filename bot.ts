@@ -141,6 +141,18 @@ export function notVideo(why: string, ies: string[] = []) {
   return by.length > 0 && by.every((ie) => NEWS.test(ie))
 }
 
+// Whether a failed -J's error (why, ies as for notVideo()) is the site's own
+// word that its page has nothing for the link now: an extractor's error (its
+// name has no space: "[Errno 28]" is the disk, and the one-file build's own
+// lines don't start with "ERROR: ") or a page without a video, unless the
+// request never got a page (the network, the proxy, TLS, a page cut short),
+// the site failed (a 5xx) or yt-dlp did (a bug it asks to have reported). An
+// error yt-dlp prints over several lines (a geo block's ends in a tip) is
+// judged by its last, untagged one.
+export const sitesWord = (why: string, ies: string[] = []) =>
+  (/^ERROR: \[[^\]\s]+\] /.test(why) || notVideo(why, ies)) &&
+  !/\(caused by (\w*(Transport|Proxy|SSL|CertificateVerify)Error\(|<IncompleteRead|<HTTPError 5\d\d)|please report this issue/i.test(why)
+
 // A stream that hasn't started makes yt-dlp -J fail: YouTube's own reasons
 // ("This live event will begin in 5 hours.", "Premieres in 3 hours") and
 // other sites' extractor messages ("This livestream has not yet started").
@@ -177,12 +189,18 @@ export function picked(info: any) {
   return info.entries?.[0] ?? info
 }
 
+// Lists whose videos yt-dlp reads whole rather than as links: a Pinterest
+// board, a list of pins (the pin pages it would read). A list isn't a post:
+// its first video goes out alone, as a list of links' does.
+const LISTS = /^PinterestCollection$/
+
 // The videos to send in what yt-dlp -J printed with ITEMS: the one, or a
 // post's (an Instagram carousel, an X post, a page with several <video>s),
-// each once, ALBUM at most; null for a playlist of links, or a multi_video
-// (one video in parts) whose first part --flat-playlist left a link, whose
-// first one is read as before (picked()), and Fail(null) for none. An item
-// yt-dlp couldn't read is null in it (a picture in a carousel has no video).
+// each once, ALBUM at most, or a list's first one (LISTS); null for a
+// playlist of links, or a multi_video (one video in parts) whose first part
+// --flat-playlist left a link, whose first one is read as before (picked()),
+// and Fail(null) for none. An item yt-dlp couldn't read is null in it (a
+// picture in a carousel has no video).
 export function picks(info: any): any[] | null {
   if (info?._type !== 'playlist') {
     const v = picked(info)
@@ -192,6 +210,7 @@ export function picks(info: any): any[] | null {
   const entries: any[] = (info.entries ?? []).filter(Boolean)
   if (!entries.length) throw new Fail(null, 'empty playlist')
   if (!entries.every(isVideo)) return null
+  if (LISTS.test(info.extractor_key)) return entries.slice(0, 1)
   return [...new Map(entries.map((v) => [cacheKey(v), v])).values()].slice(0, ALBUM)
 }
 
@@ -541,8 +560,9 @@ async function ytdlp(args: string[], timeout = 30 * 60_000, signal?: AbortSignal
 // pictures fail but whose videos it still prints (posted()), or for a
 // playlist of links -J as before, its first one read. json = what the -J
 // that picked them printed, picks = the videos (picks()), partial = an item
-// failed for another reason than being a picture (yt-dlp found no video in
-// it): the post read again may have it, so its link isn't cached.
+// of a post failed for another reason than being a picture (yt-dlp found no
+// video in it): the post read again may have it, so its link isn't cached.
+// A playlist's first one, read alone, is whole whatever its other items did.
 async function read(args: string[], url: string, timeout: number) {
   const until = Date.now() + timeout
   let partial = false
@@ -550,9 +570,12 @@ async function read(args: string[], url: string, timeout: number) {
     (r) => r.out,
     (e) => {
       if (!(e instanceof Exited && posted(e.out))) throw e
-      // a multi_video sends its first part alone, whatever its others are
+      // a multi_video sends its first part alone, whatever its others are,
+      // and a list (LISTS) its first video
+      const info = JSON.parse(e.out)
       partial =
-        JSON.parse(e.out)._type === 'playlist' &&
+        info._type === 'playlist' &&
+        !LISTS.test(info.extractor_key) &&
         (e.err.match(/^ERROR:.*$/gm) ?? []).some((line) => !/no video formats found/i.test(line))
       return e.out
     },
@@ -560,7 +583,7 @@ async function read(args: string[], url: string, timeout: number) {
   const all = picks(JSON.parse(json))
   if (all) return { json, picks: all, partial }
   const first = (await ytdlp([...args, '-J', url], until - Date.now())).out
-  return { json: first, picks: [picked(JSON.parse(first))], partial }
+  return { json: first, picks: [picked(JSON.parse(first))], partial: false }
 }
 
 type Size = { width: number; height: number }
@@ -1085,13 +1108,19 @@ export class Dead extends Error {}
 // same, and file by file it would go out twice. A cached file_id Telegram
 // doesn't have (gone(), the caller's to forget) fails an album with Dead, and
 // one by one it's left out while the others go on, so none goes out twice
-// when the caller sends them again.
+// when the caller sends them again. each hears every file as it goes out (its
+// place in items, and what send() returns), the ones before a send that
+// fails one by one too.
 export const albumSender = (
   api: Api,
   send: ReturnType<typeof sender>,
   kept: (file: string) => void = () => {},
 ) =>
-  async function album(dest: Dest, items: Item[]): Promise<([Kind, string, Message] | undefined)[]> {
+  async function album(
+    dest: Dest,
+    items: Item[],
+    each: (n: number, sent: [Kind, string, Message]) => void = () => {},
+  ): Promise<([Kind, string, Message] | undefined)[]> {
     const { kind, opts } = items[0]!
     if (items.length > 1 && (kind === 'video' || kind === 'audio') && items.every((i) => i.kind === kind)) {
       try {
@@ -1102,7 +1131,9 @@ export const albumSender = (
         )
         dest.sent = ms[0]!.message_id
         dest.more = ms.slice(1).map((m) => m.message_id)
-        return ms.map((m) => carried(m as Message, kept))
+        const sent = ms.map((m) => carried(m as Message, kept))
+        sent.forEach((s, n) => each(n, s))
+        return sent
       } catch (e) {
         // refused: a 400, or a 413 (too big for one request)
         if (!(e instanceof GrammyError && (e.error_code === 400 || e.error_code === 413))) throw e
@@ -1111,14 +1142,14 @@ export const albumSender = (
       }
     }
     const sent: ([Kind, string, Message] | undefined)[] = []
-    for (const i of items) {
-      sent.push(
-        await send(dest, i.kind, i.file, i.opts).catch((e) => {
-          if (!gone(e) || fresh(i.file())) throw e
-          console.error('resend', (e as GrammyError).description)
-          return undefined
-        }),
-      )
+    for (const [n, i] of items.entries()) {
+      const s = await send(dest, i.kind, i.file, i.opts).catch((e) => {
+        if (!gone(e) || fresh(i.file())) throw e
+        console.error('resend', (e as GrammyError).description)
+        return undefined
+      })
+      if (s) each(n, s)
+      sent.push(s)
       const out = sent.filter((s) => s !== undefined)
       dest.sent = out[0]?.[2].message_id
       dest.more = out.slice(1).map((s) => s[2].message_id)
@@ -1330,14 +1361,21 @@ function main() {
   // table of its own: files has links too, from when a post's link got its
   // first video alone. Those rows are read only to answer a guest reply at
   // once (guest()) and when a job for such a link can't get it anything new
-  // (job()); a single video's link still goes there too, for a container
-  // running older code. So such a link has its page read once again, and
-  // what it picks may be cached by its key. A link one of whose files is
-  // gone (forget) is a miss.
+  // (job(), or a request following it: deliver()); a single video's link
+  // still goes there too, for a container running older code. So such a
+  // link has its page read once again, and what it picks may be cached by
+  // its key. A link one of whose files is gone (forget) is a miss.
   db.run('CREATE TABLE IF NOT EXISTS links (url TEXT PRIMARY KEY, keys TEXT NOT NULL, title TEXT NOT NULL, link TEXT NOT NULL)')
   const remember = (url: string, keys: string[], got: Pick<Got, 'title' | 'url'>) =>
     cache('remember', () =>
       db.query('INSERT OR REPLACE INTO links VALUES (?, ?, ?, ?)').run(url, JSON.stringify(keys), got.title, got.url),
+    )
+  // A link cached with its row in files, the link itself (job()'s old
+  // copy), unless it has one here already: a post's whose files are gone,
+  // which its page read again, once that works, gets whole
+  const pin = (url: string, f: File) =>
+    cache('pin', () =>
+      db.query('INSERT OR IGNORE INTO links VALUES (?, ?, ?, ?)').run(url, JSON.stringify([url]), f.title, f.url),
     )
   const linked = db.query<{ keys: string; title: string; link: string }, [string]>(
     'SELECT keys, title, link FROM links WHERE url = ?',
@@ -1386,14 +1424,16 @@ function main() {
   // every request, ctx.api's too (grammY copies the bot's transformers)
   const flood = floodWait()
   bot.api.config.use(flood)
-  const jobs = new Map<string, Promise<Got>>()
+  // The jobs running for links, each with the chat it sends to
+  const jobs = new Map<string, { got: Promise<Got>; chat: Dest['chat'] }>()
   // The other requests for a link whose job runs follow its statuses: tell =
   // each one's, key = the job's last
   const watching = new Map<string, { key?: Key; tell: Set<(key: Key) => void> }>()
   // The requests running now, each with a way to tell its chat that the exit
   // cuts it off
   const open = new Set<() => void>()
-  // Set by the exit's cut: from then on no job begins an upload (job())
+  // Set by the exit's cut: from then on no job begins a download or an
+  // upload (job(), postJob())
   let exiting = false
   // Set once a deploy's drain has begun: from then on a guest message that
   // doesn't mention the bot isn't answered just because its time is up (guest())
@@ -1498,8 +1538,20 @@ function main() {
     const log: Record<string, string | number> = { host: new URL(url).hostname }
     const start = Date.now()
     let result = 'ok'
+    // A status the chat doesn't take (a group that takes the bot's videos
+    // but not its texts, a 5xx, a lost connection) isn't the link's failure:
+    // it's logged, and the job goes on, as its video may still go out. In a
+    // group where the bot may send nothing at all, Telegram says the same
+    // about a status, so there each link costs a download. A chat that
+    // refuses the bot outright (a 403: blocked, removed) takes no video
+    // either: that stops the job.
+    const say = (key: Key) =>
+      status(key).catch((e) => {
+        if (e instanceof GrammyError && e.error_code === 403) throw e
+        console.error('status', url, (e as Error).message)
+      })
     try {
-      const f = await job(dest, url, status, log)
+      const f = await job(dest, url, say, log)
       // only an upload times it
       if (!log.up) result = 'cached'
       return f
@@ -1523,10 +1575,17 @@ function main() {
     // a link that has to wait for a -J turn or a slot would otherwise look
     // ignored: it hears it's queued, once
     let queued = false
+    // Whether the page itself has nothing for the link now: its site's
+    // extractor failed it (a video gone, a rate limit, a bot check) or it
+    // shows no video. Not a time limit, a run that failed here (the disk, the
+    // one-file build), a request that never got a page (the network, the
+    // proxy), the site's own failure (a 5xx), a bug in yt-dlp, or anything
+    // after a read that worked: those say nothing about the page.
+    let said = false
     const wait = async (busy: boolean) => {
       if (!busy || queued) return
       queued = true
-      await status('queued').catch(() => {})
+      await status('queued')
     }
     try {
       await SCRATCH.open(dir)
@@ -1545,15 +1604,19 @@ function main() {
           }
         }, dest.who)
       } catch (e) {
-        // a restart (meta.close) isn't the link's fault
-        if (e instanceof Fail) throw e
+        // a restart (meta.close) isn't the link's fault; read()'s own Fail
+        // is a page without a video
+        if (e instanceof Fail) {
+          said = e.key === null
+          throw e
+        }
         const why = String((e as Error).message)
         const soon = unstarted(why)
         if (soon) throw new Fail(soon, why)
         // an untagged error needs the extractors that claim the link
-        const ies = /^(ERROR: )?\[/.test(why)
-          ? []
-          : ((await claims([url]).catch(() => undefined))?.get(url) ?? [])
+        const tagged = /^(ERROR: )?\[/.test(why)
+        const ies = tagged ? [] : ((await claims([url]).catch(() => undefined))?.get(url) ?? [])
+        said = sitesWord(why, ies)
         throw new Fail(notVideo(why, ies) ? null : 'failed', why)
       }
       const extracted = Date.now()
@@ -1589,10 +1652,14 @@ function main() {
       let id = cacheKey(v)
       // The video may be cached under another link, or get cached by another
       // job while this one waits; a refresh wants a new upload, not another
-      // cached copy
+      // cached copy. A copy that went out without its size is refreshed once
+      // the job is over, as a link's own copy is (deliver()), but not for a
+      // guest reply: one that doesn't mention the bot may have no answer yet,
+      // which would wait for the download (guest())
       const fromCache = async (key: string) => {
         const hit = get(key)
-        if (hit && !dest.stale && (await resend(dest, hit))) {
+        const unsized = dest.single ? undefined : (message: number) => (dest.stale = { message, file_id: hit!.file_id })
+        if (hit && !dest.stale && (await resend(dest, hit, unsized))) {
           put(url, hit)
           if (!partial) remember(url, [key], hit)
           return hit
@@ -1635,6 +1702,8 @@ function main() {
       if (taken.has(dir) && (await stat(JAR)).mtimeMs !== taken.get(dir))
         args = [...YTDLP, ...(await jar(dir))]
 
+      // past the exit's cut no download begins: its upload couldn't (below)
+      if (exiting) throw new Fail('restarting')
       await status('downloading')
       await Bun.write(join(dir, 'info.json'), saved(v, json))
       // yt-dlp holds a download to --max-filesize only by its Content-Length,
@@ -1709,7 +1778,8 @@ function main() {
           // too big: the page read again has the same video
           if (big.signal.aborted) throw big.signal.reason
           const left = budget - (Date.now() - fetched)
-          if (!reread(age, left)) throw e
+          // nor past the exit's cut, after which no upload begins
+          if (exiting || !reread(age, left)) throw e
           log.reread = 1
           return again(left)
         })
@@ -1766,18 +1836,29 @@ function main() {
       // under the link itself, not in links: that's what it got then (a
       // post's first video alone). When this job can't get it anything new
       // (its page can't be read now or shows no video, or what it shows
-      // fails to download), it still gets that copy, as it did then without
-      // reading the page; old=1 in its job's line. Not on a restart, once
-      // something of the job went out (a refresh's old copy too), nor after
-      // a Telegram error (an upload's, a cached copy's resend): a send that
-      // failed may have gone out all the same, and the old copy would meet
-      // the same refusal.
+      // fails to download, after the exit's cut too), it still gets that
+      // copy, old=1 in its job's line. When the page itself has nothing
+      // (said), the link is cached with that copy (pin()), so its page isn't
+      // read again, as it wasn't before; a download that failed or a read
+      // that failed here may work next time. A post that went out as its one
+      // video alone since has that row too, and is cached with it the same
+      // way: a site's rate limit can't be told from a post that's gone. Not
+      // for a job the restart stops (Fail('restarting')), not once something
+      // of the job went out (a refresh's old copy too), and not after a
+      // file's send failed (an upload's, a cached copy's resend): it may have
+      // gone out all the same, or the old copy would meet the same refusal.
+      // A status the chat refuses outright (a 403: download()) gets here too,
+      // and gets no old copy either: that chat takes nothing from the bot. A
+      // cached copy Telegram no longer has fails no send (resend(),
+      // repost()): nothing of it reached the chat, so the old copy may still
+      // go after it.
       const old =
         dest.sent || e instanceof GrammyError || e instanceof HttpError || (e instanceof Fail && e.key === 'restarting')
           ? undefined
           : get(url)
       if (old && (await resend(dest, old))) {
         log.old = 1
+        if (said) pin(url, old)
         return one(old)
       }
       throw e
@@ -1846,7 +1927,13 @@ function main() {
     const hit = await fromCache()
     if (hit) return hit
 
-    const long = picks.some(isLong)
+    // The lane of the videos it downloads: a cached one goes as it is.
+    // ponytail: the cache is read again once the job has its slot, so a long
+    // video whose copy is forgotten meanwhile (another job found it dead, or
+    // this one's fromCache() below) downloads in a short slot, with a short
+    // job's time and past the long lane's limit (raced=1 in the job line);
+    // take a long slot then if raced=1 ever shows up
+    const long = picks.some((v, n) => !get(keys[n]!) && isLong(v))
     log.lane = long ? 'long' : 'short'
     log.ahead = slots.waiting(long)
     log.own = slots.own(dest.who)
@@ -1862,23 +1949,28 @@ function main() {
 
     await status('downloading')
     // each video: its own dir, and its cached file, its downloaded one (path,
-    // with what it goes out with) or why it failed
+    // with what it goes out with, and up once it has) or why it failed
     const items = picks.map((v, n) => ({
       v,
       dir: join(dir, String(n + 1)),
       file: get(keys[n]!),
       path: undefined as string | undefined,
       look: {} as Partial<Item['opts']>,
+      up: undefined as File | undefined,
       error: undefined as unknown,
     }))
+    if (!long && items.some((it) => !it.file && isLong(it.v))) log.raced = 1
     type Video = (typeof items)[number]
     const fetched = Date.now()
     const until = fetched + downloadMinutes(long) * MINUTE
     // bytes of the files kept for the album
     let bytes = 0
     let rereads = 0
-    // Downloads a video into its dir, as job() does one: its file's path
+    // Downloads a video into its dir, as job() does one: its file's path. Not
+    // past the exit's cut, after which no upload begins (job()), nor does a
+    // failed download read the page again then
     const pull = async (it: Video) => {
+      if (exiting) throw new Fail('restarting')
       await mkdir(it.dir)
       await SCRATCH.open(it.dir)
       // cookies of its own: the others' downloads may run meanwhile
@@ -1913,7 +2005,7 @@ function main() {
         ).catch(async (e) => {
           if (big.signal.aborted) throw big.signal.reason
           const left = budget - (Date.now() - start)
-          if (!reread(age, left)) throw e
+          if (exiting || !reread(age, left)) throw e
           rereads++
           const reading = Date.now()
           const pick = (await read(mine, url, left)).picks.find((p) => cacheKey(p) === cacheKey(it.v))
@@ -2022,6 +2114,15 @@ function main() {
           ),
           them.map((it) => it.look),
         ),
+        // each download cached as it goes out: should a later one's send
+        // fail, the link sent again doesn't download it again
+        (n, [kind, file_id]) => {
+          const it = them[n]!
+          if (it.file) return
+          it.up = { kind, file_id, title: it.v.title || 'Video', url: it.v.webpage_url || url }
+          settle(file_id)
+          put(cacheKey(it.v), it.up)
+        },
       )
     let went: Awaited<ReturnType<typeof album>>
     try {
@@ -2044,17 +2145,10 @@ function main() {
     // a dead cached copy album() left out is forgotten, as above
     const files: File[] = []
     for (const [n, it] of ready.entries()) {
-      const sent = went[n]
-      if (!sent) {
+      if (went[n]) files.push(it.file ?? it.up!)
+      else {
         forget(it.file!)
         log.left = Number(log.left ?? 0) + 1
-      } else if (it.file) files.push(it.file)
-      else {
-        const [kind, file_id] = sent
-        const f = { kind, file_id, title: it.v.title || 'Video', url: it.v.webpage_url || url }
-        settle(file_id)
-        put(cacheKey(it.v), f)
-        files.push(f)
       }
     }
     if (!files.length) throw failed()
@@ -2078,7 +2172,21 @@ function main() {
     if (sent) return dest.stale ? refresh(dest, url, sent) : sent
     const job = jobs.get(url)
     if (job) {
-      const got = await resent(dest, await follow(url, job, status))
+      // A job that failed may have failed a send in its own chat, which a
+      // request from another chat hasn't tried: unless the restart stopped
+      // it, the link's old copy goes there as the job would have sent it
+      // (job()). In the job's chat that send may have gone out all the same.
+      const got = await resent(
+        dest,
+        await follow(url, job.got, status).catch((e) => {
+          // (a guest reply's chat is the storage chat, every guest reply's,
+          // whose id comes from the env, a string)
+          const mine = !dest.single && String(job.chat) === String(dest.chat)
+          const old = mine || (e instanceof Fail && e.key === 'restarting') ? undefined : get(url)
+          if (!old) throw e
+          return one(old)
+        }),
+      )
       if (!got) throw new Fail('failed')
       return got
     }
@@ -2092,8 +2200,10 @@ function main() {
       jobs.delete(url)
       watching.delete(url)
     })
-    jobs.set(url, fresh)
-    return fresh
+    jobs.set(url, { got: fresh, chat: dest.chat })
+    const got = await fresh
+    // the job sent a cached copy that went out without its size (job())
+    return dest.stale ? refresh(dest, url, got) : got
   }
 
   // Waits for the job of another request for the link, this one's status
@@ -2324,10 +2434,10 @@ function main() {
     // The job doesn't wait for the reply: the answer goes through a flood
     // wait (it's the one chance to post), which mustn't hold a slot, and an
     // edit after it waits for it. Progress isn't worth a flood wait, as in
-    // handle(). Past the exit's cut no job begins an upload (job()), so one
-    // with no answer yet stays without, as a group's request the cut found:
-    // its "Downloading…" could only lead to "send the link again", or stay
-    // up for good.
+    // handle(). Past the exit's cut no job begins a download or an upload
+    // (job()), so one with no answer yet stays without, as a group's request
+    // the cut found: its "Downloading…" (a post's job still shows one) could
+    // only lead to "send the link again", or stay up for good.
     const status = async (key: Key) => {
       if (!reply && key === 'queued') last = key
       else if (reply || !exiting) void say(key, PROGRESS)
@@ -2460,7 +2570,7 @@ function main() {
         slots.close(new Fail('restarting'))
         // the jobs still running 2 s before the exit won't finish: their
         // chats hear so the same way, rather than keep "Downloading…", and
-        // from then on no upload begins
+        // from then on no download or upload begins
         // (CUT_MS moves the cut: bot.e2e.test.ts cuts at once, reading the
         // "cut" line, and ends the drain itself)
         const exit = setTimeout(

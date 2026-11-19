@@ -249,9 +249,9 @@ function start(
   }
   const reading = Promise.all([read(bot.stdout, lines), read(bot.stderr, errors)])
   // a message from user with a link to video v (and whatever else follows
-  // it in the query)
+  // it in the query), or with v itself when it's a whole link
   const message = (user: number, v: string) => {
-    const text = `https://www.youtube.com/watch?v=${v}`
+    const text = v.startsWith('https://') ? v : `https://www.youtube.com/watch?v=${v}`
     return {
       message_id: ++id,
       date: 0,
@@ -1156,28 +1156,44 @@ e2e(
 )
 
 e2e(
-  "bot: on a deploy, a guest reply that doesn't mention the bot and has no answer yet gets none when its -J finds a video after the cut",
+  "bot: on a deploy, a link whose -J finds a video after the cut isn't downloaded: a request hears to send it again, and a guest reply that doesn't mention the bot and has no answer yet gets none, a post's too",
   async () => {
-    const bot = start({ ...DEPLOY, STORAGE_CHAT: '9' })
+    const bot = start({ ...DEPLOY, STORAGE_CHAT: '9', MAX_DOWNLOADS: '4' })
+    // short videos, a guest reply's and a request's, and a guest reply's
+    // post of two, whose -J is held until the cut has come, and whose
+    // downloads would be held too. A post's job still says "Downloading…"
+    // before its downloads (none of which begins), which the guest reply
+    // doesn't show
+    const ids = ['jholdvideo40', 'jholdvideo41', 'jholdpost42']
+    const downloads = [...ids, 'jholdpost42-2']
     let jobs: string[] = []
+    let held: boolean[] = []
     try {
-      // a short video, whose -J is held until the cut has come
-      bot.guest(40, 'short40', 'reply', 'https://www.youtube.com/watch?v=jholdvideo40')
-      await bot.until(() => bot.held('jholdvideo40', 'J') && bot.waits(40))
+      bot.guest(40, 'short40', 'reply', 'https://www.youtube.com/watch?v=jholdvideo40&dhold')
+      bot.link(1, 'jholdvideo41&dhold')
+      bot.guest(42, 'short42', 'reply', 'https://www.youtube.com/watch?v=jholdpost42&multi&n=2&dhold')
+      await bot.until(() => ids.every((id) => bot.held(id, 'J')) && bot.waits(40) && bot.waits(42))
       await bot.term()
-      bot.release('jholdvideo40', 'J')
-      // a free slot still takes it, and it downloads; past the cut no upload
-      // begins, so its job ends there
-      await bot.until(() => bot.jobs().length === 1)
+      for (const id of ids) bot.release(id, 'J')
+      // a free slot still takes each, and its job ends there: a download
+      // begun would be held, its job with it
+      await bot.until(() => bot.jobs().length === 3 || downloads.some((id) => bot.held(id, 'dl')))
+      // (stop() takes the gates away)
+      held = downloads.map((id) => bot.held(id, 'dl'))
     } finally {
-      bot.release('jholdvideo40', 'J')
+      for (const id of ids) bot.release(id, 'J')
+      for (const id of downloads) bot.release(id, 'dl')
       jobs = await bot.stop()
     }
+    expect(held).toEqual([false, false, false, false])
     // no "Downloading…" that could only lead to "send the link again", as a
     // group message that didn't mention the bot gets none
     expect(bot.calls.filter((c) => c.query || c.inline).map((c) => c.method)).toEqual([])
+    expect(bot.statuses(1)).toEqual([t('en', 'restarting')])
     expect(bot.videos()).toHaveLength(0)
-    expect(jobs.filter((l) => /^job fail:restarting .* dl=/.test(l))).toHaveLength(1)
+    // each took its slot, and downloaded nothing
+    expect(jobs.filter((l) => /^job fail:restarting .* wait=/.test(l) && !l.includes(' dl='))).toHaveLength(2)
+    expect(jobs.filter((l) => /^job fail:restarting .* wait=.* items=0\/2 /.test(l))).toHaveLength(1)
   },
   30_000,
 )
@@ -3483,12 +3499,13 @@ e2e(
 )
 
 e2e(
-  "bot: a link cached before posts went out whole gets that copy when its page can't be read now or shows no video any more, and its post's videos when it can; a guest reply with such a link is answered at once",
+  "bot: a link cached before posts went out whole gets that copy when its page can't be read now or shows no video any more, and is then cached with it (sent again, it goes out without a job), and its post's videos when it can; a guest reply with such a link is answered at once",
   async () => {
     // files has each link under the link itself, as the bot cached them
     // before (a post's first video alone): gone3's page can't be read now,
     // post24's is a post of two, news25's reads as an article without media
-    // and jholdgone26's can't be read either, its -J held
+    // and jholdgone26's can't be read either, its -J held. gone3 is sent
+    // again at the end
     const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
     const db = new Database(join(data, 'bot.sqlite'))
     db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
@@ -3513,7 +3530,9 @@ e2e(
       bot.guest(4, 'short4', 'reply', postLink('jholdgone26&fail'))
       await bot.until(() => bot.held('jholdgone26', 'J') && bot.reply(4).length > 0)
       bot.release('jholdgone26', 'J')
-      await bot.until(() => bot.reply(4).includes('video'))
+      await bot.until(() => bot.reply(4).includes('video') && bot.jobs().length === 4)
+      bot.link(5, 'gone3&fail')
+      await bot.until(() => bot.videos().length === 4)
     } finally {
       jobs = await bot.stop()
       rmSync(data, { recursive: true, force: true })
@@ -3522,13 +3541,14 @@ e2e(
       [1, false, 'old3'],
       [3, false, 'old5'],
       [9, false, 'old6'],
+      [5, false, 'old3'],
     ])
-    expect(bot.statuses(1)).toEqual([])
-    expect(bot.statuses(3)).toEqual([])
+    for (const chat of [1, 3, 5]) expect(bot.statuses(chat)).toEqual([])
     expect(bot.reply(4)).toEqual([t('en', 'downloading'), 'video'])
     const [album] = bot.albums()
     expect(album!.chat).toBe(2)
     expect(album!.album!.map((m) => m.upload)).toEqual([true, true])
+    // gone3 sent again ran no job
     expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['cached', 'cached', 'cached', 'ok'])
     // the old copies' jobs tell them from another cache hit
     expect(jobs.filter((l) => /^job cached .* old=1 total=/.test(l))).toHaveLength(3)
@@ -3537,14 +3557,72 @@ e2e(
 )
 
 e2e(
-  "bot: a link cached before posts went out whole, under its video's key too, gets that copy when what its page shows now fails to download, but not after Telegram fails a send (its upload, or a resend of its cached copy)",
+  "bot: a link cached before posts went out whole is cached with its old copy only when its page itself has nothing (its site's error, no video, no page yt-dlp can read), not when the read failed here or never reached the site, nor over a post's row whose copies are gone",
+  async () => {
+    // Each link is sent twice, the second time once every first job is over
+    // (a request while one runs would follow it). gone31's site says the
+    // video is unavailable, news32 reads as an article without media and
+    // the example.com page is no page yt-dlp can read (an untagged
+    // "Unsupported URL"): those links are cached with their old copies.
+    // crash34's -J dies of a full disk, as yt-dlp prints an OSError
+    // ("ERROR: [Errno 28] …"), offline35's can't reach the site, and
+    // gone36's link has a post's row in links whose files are gone (as when
+    // Telegram no longer had them), which stays for the post its page read
+    // again gets once that works: those are read again. Each of those three
+    // is on a host of its own, which its job line names.
+    const links = [
+      postLink('gone31&fail'),
+      postLink('news32'),
+      'https://example.com/clip33',
+      'https://youtube.com/watch?v=crash34',
+      'https://youtu.be/watch?v=offline35',
+      'https://www.youtu.be/watch?v=gone36&fail',
+    ]
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    links.forEach((url, n) => db.run("INSERT INTO files VALUES (?, 'video', ?, 'Video', ?)", [url, `old${n + 1}`, url]))
+    db.run('CREATE TABLE links (url TEXT PRIMARY KEY, keys TEXT NOT NULL, title TEXT NOT NULL, link TEXT NOT NULL)')
+    db.run("INSERT INTO links VALUES (?, ?, 'Post', ?)", [links[5]!, JSON.stringify(['Twitter:gone36', 'Twitter:gone36-2']), links[5]!])
+    db.close()
+    const bot = start({ DATA_DIR: data, MAX_DOWNLOADS: '7' })
+    let jobs: string[] = []
+    try {
+      links.forEach((url, n) => bot.link(n + 1, url))
+      await bot.until(() => bot.jobs().length === 6)
+      links.forEach((url, n) => bot.link(n + 11, url))
+      await bot.until(() => bot.videos().length === 12)
+    } finally {
+      jobs = await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // every request got its link's old copy, without a status
+    expect(bot.videos().map((c) => [c.chat, c.upload, c.by]).sort((a, b) => Number(a[0]) - Number(b[0]))).toEqual(
+      [1, 11].flatMap((first) => links.map((_, n) => [first + n, false, `old${n + 1}`])),
+    )
+    expect(bot.calls.filter((c) => /^(sendMessage|editMessageText)$/.test(c.method))).toEqual([])
+    // the first six jobs, then crash34's, offline35's and gone36's again
+    expect(jobs).toHaveLength(9)
+    expect(jobs.filter((l) => /^job cached .* old=1 total=/.test(l))).toHaveLength(9)
+    expect(jobs.slice(6).map((l) => l.split(' ')[2]).sort()).toEqual(['host=www.youtu.be', 'host=youtu.be', 'host=youtube.com'])
+  },
+  30_000,
+)
+
+e2e(
+  "bot: a link cached before posts went out whole, under its video's key too, gets that copy when what its page shows now fails to download (and is tried again the next time), even when its status can't be shown, but not after Telegram fails a send (its upload, or a resend of its cached copy, with an answer that's JSON or not)",
   async () => {
     // files has each link under the link itself and under its video's key,
     // as the bot cached them before: old7's page still shows that video,
     // old8's another one now, whose download fails, post9x's is a post of two
     // now, the 2nd one's download failing, old10's another video, whose
     // upload Telegram fails (a 5xx: it may have gone out all the same), and
-    // old11's still shows that video, whose resend from its key fails so
+    // old11's still shows that video, whose resend from its key fails so.
+    // old12 is old8 in a chat that takes no text from the bot (its status
+    // gets a 400), and old13 is old11 with a 502 that isn't JSON, which
+    // grammY throws as an HttpError rather than a GrammyError. old8's page
+    // read fine, so its link isn't cached with the old copy: sent again at
+    // the end, it's tried again
     const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
     const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
     const db = new Database(join(data, 'bot.sqlite'))
@@ -3555,6 +3633,8 @@ e2e(
       ['post9x&multi&n=2&bad=2', 'Twitter:post9x', 'old9f'],
       ['old10&next=new10', 'Youtube:old10', 'old10f'],
       ['old11', 'Youtube:old11', 'old11f'],
+      ['old12&next=brokennew12', 'Youtube:old12', 'old12f'],
+      ['old13', 'Youtube:old13', 'old13f'],
     ] as const
     for (const [v, key, file] of links) {
       db.run("INSERT INTO files VALUES (?, 'video', ?, 'Video', ?)", [postLink(v), file, postLink(v)])
@@ -3562,16 +3642,24 @@ e2e(
     }
     db.close()
     // read before, so they show their next= video
-    for (const id of ['old8', 'old10']) writeFileSync(join(pages, id), 'read\n')
-    const bot = start({ DATA_DIR: data, PAGES: pages, MAX_DOWNLOADS: '5' }, (c) =>
+    for (const id of ['old8', 'old10', 'old12']) writeFileSync(join(pages, id), 'read\n')
+    const bot = start({ DATA_DIR: data, PAGES: pages, MAX_DOWNLOADS: '7' }, (c) =>
       (c.chat === 4 && c.upload) || (c.chat === 5 && c.method === 'sendVideo')
         ? Response.json({ ok: false, error_code: c.chat === 4 ? 500 : 502, description: 'Server Error' })
-        : 0,
+        : c.chat === 6 && c.method === 'sendMessage'
+          ? Response.json({ ok: false, error_code: 400, description: 'Bad Request: not enough rights to send text messages to the chat' })
+          : c.chat === 7 && c.method === 'sendVideo'
+            ? new Response('<html>502</html>', { status: 502 })
+            : 0,
     )
     let jobs: string[] = []
     try {
       links.forEach(([v], n) => bot.link(n + 1, v))
-      await bot.until(() => bot.videos().some((c) => c.chat === 1) && [2, 3, 4, 5].every((chat) => done(bot, chat)))
+      await bot.until(
+        () => [1, 6].every((chat) => bot.videos().some((c) => c.chat === chat)) && [2, 3, 4, 5, 7].every((chat) => done(bot, chat)),
+      )
+      bot.link(8, links[1][0])
+      await bot.until(() => bot.jobs().filter((l) => / old=1 /.test(l)).length === 3 && done(bot, 8))
     } finally {
       jobs = await bot.stop()
       rmSync(pages, { recursive: true, force: true })
@@ -3581,26 +3669,32 @@ e2e(
       [1, false, 'old7f'],
       [2, false, 'old8f'],
       [3, false, 'old9f'],
-      // the one that failed, not tried again
+      // the ones that failed, not tried again
       [5, false, 'old11f'],
+      [6, false, 'old12f'],
+      [7, false, 'old13f'],
+      [8, false, 'old8f'],
     ])
     expect(bot.calls.filter((c) => c.chat === 4 && c.upload).map((c) => c.method)).toEqual(['sendAudio', 'sendDocument'])
     expect(bot.statuses(1)).toEqual([])
-    expect(bot.statuses(2)).toEqual([t('en', 'downloading')])
+    for (const chat of [2, 6, 8]) expect(bot.statuses(chat)).toEqual([t('en', 'downloading')])
     expect(bot.statuses(4)).toEqual([t('en', 'downloading'), t('en', 'uploading'), t('en', 'failed')])
-    expect(bot.statuses(5)).toEqual([t('en', 'failed')])
-    expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['cached', 'cached', 'error', 'error', 'ok'])
-    // old8's alone is the old copy; old7's is its key's, post9x's the post's
-    // first video's
-    expect(jobs.filter((l) => / old=1 /.test(l))).toEqual([expect.stringMatching(/^job cached .* dur=40 .* mb=3 /)])
+    for (const chat of [5, 7]) expect(bot.statuses(chat)).toEqual([t('en', 'failed')])
+    expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['cached', 'cached', 'cached', 'cached', 'error', 'error', 'error', 'ok'])
+    // old8's (twice) and old12's alone are the old copies; old7's is its
+    // key's, post9x's the post's first video's
+    expect(jobs.filter((l) => / old=1 /.test(l))).toEqual(Array(3).fill(expect.stringMatching(/^job cached .* dur=40 .* mb=3 /)))
     expect(jobs.filter((l) => / items=1\/2 /.test(l))).toHaveLength(1)
   },
   30_000,
 )
 
 e2e(
-  "bot: on a deploy, a link cached before posts went out whole whose download fails after the cut gets that copy, the notice deleted, and one whose download ends after it doesn't",
+  "bot: on a deploy, a link cached before posts went out whole whose download fails after the cut gets that copy, the notice deleted, and one whose download ends after it doesn't, nor does a request from another chat following its job",
   async () => {
+    // dholdshort13's page still shows a video, whose download the restart
+    // stops short of its upload: neither its job's chat nor chat 3, which
+    // follows the job, gets the old copy next to the notice
     const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
     const db = new Database(join(data, 'bot.sqlite'))
     db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
@@ -3616,8 +3710,10 @@ e2e(
       bot.link(1, 'dholdbroken12')
       bot.link(2, 'dholdshort13')
       await bot.until(() => bot.held('dholdbroken12', 'dl') && bot.held('dholdshort13', 'dl'))
+      bot.link(3, 'dholdshort13')
+      await bot.until(() => bot.statuses(3).length > 0)
       await bot.term()
-      await bot.until(() => [1, 2].every((chat) => bot.statuses(chat).length === 2))
+      await bot.until(() => [1, 2, 3].every((chat) => bot.statuses(chat).length === 2))
       bot.release('dholdbroken12', 'dl')
       bot.release('dholdshort13', 'dl')
       await bot.until(() => bot.jobs().length === 2 && bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage'))
@@ -3626,7 +3722,7 @@ e2e(
       rmSync(data, { recursive: true, force: true })
     }
     expect(bot.videos().map((c) => [c.chat, c.upload, c.by])).toEqual([[1, false, 'old12f']])
-    for (const chat of [1, 2]) expect(bot.statuses(chat)).toEqual([t('en', 'downloading'), t('en', 'restarting')])
+    for (const chat of [1, 2, 3]) expect(bot.statuses(chat)).toEqual([t('en', 'downloading'), t('en', 'restarting')])
     expect(bot.calls.filter((c) => c.method === 'deleteMessage').map((c) => c.chat)).toEqual([1])
     expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['cached', 'fail:restarting'])
     expect(jobs.filter((l) => / old=1 /.test(l))).toHaveLength(1)
@@ -3635,27 +3731,338 @@ e2e(
 )
 
 e2e(
-  "bot: a multi_video (one video in parts) whose later part yt-dlp can't read sends its first one, cached under its link: sent again, it goes out without the page read again",
+  "bot: a request following the job of a link cached before posts went out whole gets that copy when the job's upload fails, but not in the job's own chat, which hears it failed; a guest reply following another guest reply's job gets it too, but not a request from the storage chat, where that job's upload failed",
   async () => {
+    // old14's page shows another video now, dholdnew14, whose download is
+    // held while the same user's request and another user's come to follow
+    // the job. The job's upload gets a 500: it may have gone out all the
+    // same, so its chat gets no old copy, nor does the request following it
+    // there, while the other user's, which had no send, gets it. old23 is
+    // the same for two guest replies: both send through the storage chat,
+    // where the job's upload gets the 500, but each shows its own reply. A
+    // request from the storage chat itself (its id a string from the env,
+    // the chat's a number) follows that job as well, and hears it failed
     const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
-    const bot = start({ PAGES: pages })
-    let reads = ''
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const [v, guest] = ['old14&next=dholdnew14', 'old23&next=dholdnew23']
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    for (const [link, file] of [[v, 'old14f'], [guest, 'old23f']])
+      db.run("INSERT INTO files VALUES (?, 'video', ?, 'Video', ?)", [postLink(link!), file!, postLink(link!)])
+    db.close()
+    for (const id of ['old14', 'old23']) writeFileSync(join(pages, id), 'read\n')
+    const bot = start({ DATA_DIR: data, PAGES: pages, STORAGE_CHAT: '9' }, (c) =>
+      (c.chat === 1 || c.chat === 9) && c.upload ? Response.json({ ok: false, error_code: 500, description: 'Internal Server Error' }) : 0,
+    )
+    let jobs: string[] = []
+    const failed = (chat: number) => bot.statuses(chat).filter((s) => s === t('en', 'failed')).length
     try {
-      bot.link(1, 'mvid1&multi&n=3&gone=2')
+      bot.link(1, v)
+      bot.guest(3, guest)
+      await bot.until(() => bot.held('dholdnew14', 'dl') && bot.held('dholdnew23', 'dl'))
+      bot.link(1, v)
+      bot.link(2, v)
+      bot.guest(4, guest)
+      bot.link(9, guest)
+      await bot.until(
+        () => bot.statuses(1).length === 2 && bot.statuses(2).length > 0 && bot.reply(4).length > 0 && bot.statuses(9).length > 0,
+      )
+      bot.release('dholdnew14', 'dl')
+      bot.release('dholdnew23', 'dl')
+      // (chat 9 hears it failed, or would get a second old copy there)
+      await bot.until(
+        () =>
+          failed(1) === 2 &&
+          done(bot, 2) &&
+          bot.reply(3).includes(t('en', 'failed')) &&
+          bot.reply(4).includes('video') &&
+          (failed(9) > 0 || bot.videos().filter((c) => c.chat === 9).length > 1),
+      )
+    } finally {
+      jobs = await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+      rmSync(data, { recursive: true, force: true })
+    }
+    for (const chat of [1, 9]) expect(bot.calls.filter((c) => c.chat === chat && c.upload).map((c) => c.method)).toEqual(['sendAudio', 'sendDocument'])
+    expect(bot.videos().map((c) => [c.chat, c.upload, c.by]).sort()).toEqual([
+      [2, false, 'old14f'],
+      [9, false, 'old23f'],
+    ])
+    // chat 1's two requests, each with its own status
+    expect(bot.statuses(1).sort()).toEqual([...Array(2).fill(t('en', 'downloading')), ...Array(2).fill(t('en', 'uploading')), ...Array(2).fill(t('en', 'failed'))].sort())
+    expect(bot.statuses(2)).toEqual([t('en', 'downloading'), t('en', 'uploading')])
+    expect(bot.statuses(9)).toEqual([t('en', 'downloading'), t('en', 'uploading'), t('en', 'failed')])
+    // the guest replies: the job's hears it failed, the other shows the old copy
+    expect(bot.reply(3).at(-1)).toBe(t('en', 'failed'))
+    expect(bot.reply(4).at(-1)).toBe('video')
+    expect(bot.calls.filter((c) => c.method === 'editMessageMedia').map((c) => c.edited)).toEqual(['old23f'])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['error', 'error'])
+  },
+  30_000,
+)
+
+e2e(
+  "bot: a status the chat doesn't take doesn't stop the job (a video's 400 where the bot may send videos but not texts, a post's answer that isn't JSON), but one the chat refuses the bot outright with (a 403) does",
+  async () => {
+    // chat 1's texts get a 400, as in a group that lets the bot send videos
+    // but not texts, chat 2's a 502 that isn't JSON, which grammY throws as
+    // an HttpError, and chat 3's a 403, as from a user who blocked the bot
+    const bot = start({ MAX_DOWNLOADS: '4' }, (c) =>
+      c.method !== 'sendMessage'
+        ? 0
+        : c.chat === 1
+          ? Response.json({ ok: false, error_code: 400, description: 'Bad Request: not enough rights to send text messages to the chat' })
+          : c.chat === 2
+            ? new Response('<html>502</html>', { status: 502 })
+            : Response.json({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }),
+    )
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'short1')
+      bot.link(2, 'post2&multi&n=2')
+      bot.link(3, 'short3')
+      await bot.until(() => bot.jobs().length === 3)
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(bot.videos().map((c) => [c.chat, c.upload])).toEqual([[1, true]])
+    expect(bot.albums().map((c) => [c.chat, c.album!.map((m) => m.upload)])).toEqual([[2, [true, true]]])
+    // each status tried as a reply, none shown (so none to delete), each
+    // logged; chat 3's first one ended its job before the download, and its
+    // answer was refused too
+    for (const chat of [1, 2]) expect(bot.statuses(chat)).toEqual([t('en', 'downloading'), t('en', 'uploading')])
+    expect(bot.statuses(3)).toEqual([t('en', 'downloading'), t('en', 'failed')])
+    expect(bot.calls.filter((c) => c.method === 'deleteMessage')).toEqual([])
+    expect(bot.stderr().filter((l) => l.startsWith('status '))).toHaveLength(4)
+    expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['error', 'ok', 'ok'])
+    expect(jobs.find((l) => l.startsWith('job error '))).not.toContain(' dl=')
+  },
+  30_000,
+)
+
+e2e(
+  "bot: a video cached before videos went out with their size and before posts went out whole, under its link and its key but in no links row, is downloaded again to replace its copy at its first request; a guest reply that gets such a copy doesn't wait for that",
+  async () => {
+    // As old3 in the refresh test below, without the links row its link has
+    // once it has gone out since: the job that reads its page sends the copy
+    // cached under its key, which the fake Bot API resends without a size.
+    // old16's copy is cached under its key alone (another link to it was
+    // sent), and a guest reply that doesn't mention the bot asks for it: it
+    // has no answer until its job is done, so it isn't refreshed
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    for (const key of [postLink('old15'), 'Youtube:old15'])
+      db.run("INSERT INTO files VALUES (?, 'video', 'unsized15', 'Video', ?)", [key, postLink('old15')])
+    db.run("INSERT INTO files VALUES ('Youtube:old16', 'video', 'unsized16', 'Video', ?)", [postLink('old16&t=1')])
+    db.close()
+    const bot = start({ DATA_DIR: data, STORAGE_CHAT: '9' })
+    let jobs: string[] = []
+    let cached: Record<string, string> = {}
+    try {
+      bot.link(1, 'old15')
+      bot.guest(2, 'short2', 'reply', postLink('old16'))
+      await bot.until(
+        () => bot.jobs().length >= 3 && bot.calls.some((c) => c.chat === 1 && c.method === 'deleteMessage') && bot.reply(2).includes('video'),
+      )
+    } finally {
+      jobs = await bot.stop()
+      const db = new Database(join(data, 'bot.sqlite'))
+      const rows = db.query<{ key: string; file_id: string }, []>('SELECT key, file_id FROM files').all()
+      cached = Object.fromEntries(rows.map((r) => [r.key, r.file_id]))
+      db.close()
+      rmSync(data, { recursive: true, force: true })
+    }
+    // the old copy, then the new one, and the old copy's message deleted
+    const [old, fresh] = bot.videos().filter((c) => c.chat === 1)
+    expect(bot.videos().filter((c) => c.chat === 1)).toHaveLength(2)
+    expect([old!.upload, old!.by, fresh!.upload]).toEqual([false, 'unsized15', true])
+    expect(bot.calls.filter((c) => c.chat === 1 && c.method === 'deleteMessage')).toHaveLength(1)
+    // the new copy under the link and the key
+    expect(cached['Youtube:old15']).toBe(`v${fresh!.unique!.slice(1)}`)
+    expect(cached[postLink('old15')]).toBe(cached['Youtube:old15'])
+    // the guest reply: old16's copy through the storage chat, nothing new
+    expect(bot.videos().filter((c) => c.chat === 9).map((c) => [c.upload, c.by])).toEqual([[false, 'unsized16']])
+    expect(bot.reply(2)).toEqual([t('en', 'downloading'), 'video'])
+    expect(cached['Youtube:old16']).toBe('unsized16')
+    expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['cached', 'cached', 'ok'])
+  },
+  30_000,
+)
+
+e2e(
+  "bot: a post whose album Telegram refuses goes file by file, and when a later file's send fails, the ones that went out are cached all the same: the link sent again downloads only the rest",
+  async () => {
+    // chat 1's album gets a 413 (too big for one request, as the cloud Bot
+    // API answers), so its files go one by one, and its 2nd upload a 500, as
+    // does the document it falls back to
+    let uploads = 0
+    const bot = start({}, (c) =>
+      c.chat === 1 && c.method === 'sendMediaGroup'
+        ? Response.json({ ok: false, error_code: 413, description: 'Request Entity Too Large' })
+        : c.chat === 1 && c.upload && ++uploads > 1
+          ? Response.json({ ok: false, error_code: 500, description: 'Internal Server Error' })
+          : 0,
+    )
+    const post = 'post16&multi&n=2'
+    let jobs: string[] = []
+    try {
+      bot.link(1, post)
       await bot.until(() => done(bot, 1))
-      bot.link(2, 'mvid1&multi&n=3&gone=2')
-      await bot.until(() => bot.videos().some((c) => c.chat === 2))
-      reads = readFileSync(join(pages, 'mvid1'), 'utf8')
+      bot.link(2, post)
+      await bot.until(() => bot.albums().length === 2 && done(bot, 2))
+    } finally {
+      jobs = await bot.stop()
+    }
+    // chat 1: its 1st video went out, its 2nd didn't
+    const sent = bot.videos().filter((c) => c.chat === 1)
+    expect(sent.map((c) => [c.upload, !!c.unique])).toEqual([
+      [true, true],
+      [true, false],
+    ])
+    expect(bot.statuses(1).at(-1)).toBe(t('en', 'failed'))
+    // chat 2: the 1st by the file_id it went out as, the 2nd downloaded
+    const [, album] = bot.albums()
+    expect(album!.chat).toBe(2)
+    expect(album!.album!.map((m) => [m.upload, m.id])).toEqual([
+      [false, `v${sent[0]!.unique!.slice(1)}`],
+      [true, undefined],
+    ])
+    expect(jobs.map((l) => l.split(' ', 2)[1])).toEqual(['error', 'ok'])
+  },
+  30_000,
+)
+
+e2e(
+  "bot: a post whose only long video is cached downloads the others in a short slot",
+  async () => {
+    // post17's 1st video is 50 minutes long and cached under its key, its
+    // 2nd (30 s) all it downloads. The one slot long videos get of two is
+    // another user's long download's all along
+    const data = mkdtempSync(join(tmpdir(), 'bot-e2e-data-'))
+    const post = 'post17&multi&n=2&lengthy=1'
+    const db = new Database(join(data, 'bot.sqlite'))
+    db.run('CREATE TABLE files (key TEXT PRIMARY KEY, kind TEXT NOT NULL, file_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL)')
+    db.run("INSERT INTO files VALUES ('Twitter:post17', 'video', 'long17f', 'Video', ?)", [postLink(post)])
+    db.close()
+    const bot = start({ DATA_DIR: data })
+    let jobs: string[] = []
+    try {
+      bot.link(2, 'dholdlong2')
+      await bot.until(() => bot.held('dholdlong2', 'dl'))
+      bot.link(1, post)
+      await bot.until(() => bot.albums().length === 1 && done(bot, 1))
+      bot.release('dholdlong2', 'dl')
+      await bot.until(() => bot.jobs().length === 2)
+    } finally {
+      jobs = await bot.stop()
+      rmSync(data, { recursive: true, force: true })
+    }
+    expect(bot.albums()[0]!.album!.map((m) => [m.upload, m.id])).toEqual([
+      [false, 'long17f'],
+      [true, undefined],
+    ])
+    expect(bot.statuses(1).map((s) => [...s][0])).toEqual(['⏬', '⏫'])
+    // its dur is still its longest video's
+    expect(jobs.find((l) => / items=/.test(l))).toMatch(/ lane=short .* dur=3000 /)
+  },
+  30_000,
+)
+
+e2e(
+  "bot: on a deploy, a post's job begins no download past the cut: the videos still in its line aren't downloaded, and its chat keeps the notice",
+  async () => {
+    // Two slots, so one user's share is one: the post's three videos download
+    // one after another in its job's own slot. The cut comes during the 1st
+    // one's download; the others would then download at once
+    const bot = start(DEPLOY)
+    const ids = ['dholdpost18', 'dholdpost18-2', 'dholdpost18-3']
+    let jobs: string[] = []
+    let held: boolean[] = []
+    try {
+      bot.link(1, 'dholdpost18&multi&n=3')
+      await bot.until(() => bot.held('dholdpost18', 'dl'))
+      await bot.term()
+      for (const id of ids) bot.release(id, 'dl')
+      await bot.until(() => bot.jobs().length === 1)
+      // (stop() takes the gates away)
+      held = ids.map((id) => bot.held(id, 'dl'))
+    } finally {
+      jobs = await bot.stop()
+    }
+    expect(held).toEqual([true, false, false])
+    expect(bot.albums()).toEqual([])
+    expect(bot.statuses(1)).toEqual([t('en', 'downloading'), t('en', 'restarting')])
+    expect(jobs[0]).toMatch(/^job fail:restarting .* items=1\/3 /)
+  },
+  30_000,
+)
+
+e2e(
+  "bot: on a deploy, a download that fails past the cut doesn't read the page again, a video's or a post's",
+  async () => {
+    // A minute is 1 s and "Downloading…" takes 1.5 s to show, so the -J info
+    // is stale by the download, and a download that fails would read the
+    // page again. Both are held until the cut, then fail: dholdbroken19's,
+    // and that of dholdpost20's 1st video (bad=1)
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const bot = start({ ...DEPLOY, MINUTE_MS: '1000', PAGES: pages }, (c) => (c.text?.startsWith('⏬') ? 1500 : 0))
+    let jobs: string[] = []
+    let reads: string[] = []
+    try {
+      bot.link(1, 'dholdbroken19')
+      bot.link(2, 'dholdpost20&multi&n=2&bad=1')
+      await bot.until(() => bot.held('dholdbroken19', 'dl') && bot.held('dholdpost20', 'dl'))
+      await bot.term()
+      bot.release('dholdbroken19', 'dl')
+      bot.release('dholdpost20', 'dl')
+      await bot.until(() => bot.jobs().length === 2)
+      reads = ['dholdbroken19', 'dholdpost20'].map((id) => readFileSync(join(pages, id), 'utf8'))
+    } finally {
+      jobs = await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+    }
+    // each page read by its -J alone
+    expect(reads).toEqual(['read\n', 'read\n'])
+    expect(jobs.some((l) => / reread=/.test(l))).toBe(false)
+  },
+  30_000,
+)
+
+e2e(
+  "bot: a multi_video (one video in parts) whose later part yt-dlp can't read, a playlist with a link in it and an item yt-dlp can't read, or a Pinterest board with a pin it can't read, sends its first one, cached under its link: sent again, it goes out without the page read again",
+  async () => {
+    // list3 is a video, a link to another page and an item yt-dlp fails on:
+    // listed, then its first one read alone. board5's pins are read whole,
+    // its 2nd failing: its first video goes from that one read
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const bot = start({ PAGES: pages, MAX_DOWNLOADS: '3' })
+    const [mvid, list, board] = ['mvid1&multi&n=3&gone=2', 'list3&multi&n=3&link=2&gone=3', 'board5&multi&n=3&board&gone=2']
+    let reads: string[] = []
+    try {
+      bot.link(1, mvid)
+      bot.link(3, list)
+      bot.link(5, board)
+      await bot.until(() => [1, 3, 5].every((chat) => done(bot, chat)))
+      bot.link(2, mvid)
+      bot.link(4, list)
+      bot.link(6, board)
+      await bot.until(() => [2, 4, 6].every((chat) => bot.videos().some((c) => c.chat === chat)))
+      reads = ['mvid1', 'list3', 'board5'].map((id) => readFileSync(join(pages, id), 'utf8'))
     } finally {
       await bot.stop()
       rmSync(pages, { recursive: true, force: true })
     }
-    expect(bot.videos().map((c) => [c.chat, c.upload])).toEqual([
+    expect(bot.videos().map((c) => [c.chat, c.upload]).sort()).toEqual([
       [1, true],
       [2, false],
+      [3, true],
+      [4, false],
+      [5, true],
+      [6, false],
     ])
     expect(bot.albums()).toEqual([])
-    expect(reads).toBe('read\n')
+    expect(reads).toEqual(['read\n', 'read\nread\n', 'read\n'])
   },
   30_000,
 )
