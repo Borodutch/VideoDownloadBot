@@ -4,6 +4,7 @@ import type { ApiResponse, InputMediaVideo, Message } from 'grammy/types'
 import { existsSync, rmSync, writeFileSync } from 'node:fs'
 import { chmod, copyFile, mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
 import { egressProxy, proxyFreeEnv } from './egress'
 import { DRAIN, pollWithHandover } from './handover'
 import { type Key, t } from './i18n'
@@ -898,6 +899,43 @@ const check = limit(2)
 type Signal = NonNullable<Parameters<Api['sendMessage']>[3]>
 export const PROGRESS = new AbortController().signal as unknown as Signal
 
+// The Bot API client's fetch: grammY's own (its node-fetch is Bun's fetch in
+// Bun), made to see a web server's 413 through. The nginx in front of the
+// cloud Bot API refuses an album too big for one request with an HTML page,
+// which nginx sends as soon as the upload passes its limit, nothing of it
+// sent. Bun then stops the upload and would end grammY's form-data stream
+// with an error, which grammY takes for the call failing before its answer.
+// So Bun gets the stream pulled by hand, and what's left of it closes
+// without an error when Bun stops the upload (the connection closed or
+// reset, the call timed out), not when the answer's headers come: its body
+// may come after them. grammY can't read the page either, so the 413
+// reaches it as the Bot API's own JSON one, the upload's rest closed: a
+// refusal, and album() sends the files one by one. Any other page still
+// fails the call without its status, as a 5xx one should: the request may
+// have gone through.
+export async function apiFetch(url: string, init: RequestInit) {
+  const body: unknown = init.body
+  const rest = body instanceof Readable ? body : undefined
+  if (rest) {
+    const it = rest[Symbol.asyncIterator]()
+    init = {
+      ...init,
+      body: new ReadableStream({
+        async pull(c) {
+          const r = await it.next()
+          if (r.done) c.close()
+          else c.enqueue(r.value)
+        },
+        cancel: () => void rest.destroy(),
+      }),
+    }
+  }
+  const res = await fetch(url, init)
+  if (res.status !== 413 || res.headers.get('content-type')?.includes('json')) return res
+  rest?.destroy()
+  return Response.json({ ok: false, error_code: 413, description: 'Request Entity Too Large' })
+}
+
 // Telegram's flood control: a 429 says how many seconds until the chat takes
 // messages again (parameters.retry_after, 3-40 s in busy groups). The request
 // waits that long and goes again, up to retries times and max seconds in all,
@@ -1419,7 +1457,7 @@ function main() {
   const promo = promos(db)
   db.run('PRAGMA busy_timeout = 0')
   const bot = new Bot(env.TOKEN!, {
-    client: { apiRoot: API, timeoutSeconds: 3600 },
+    client: { apiRoot: API, timeoutSeconds: 3600, fetch: apiFetch },
   })
   // every request, ctx.api's too (grammY copies the bot's transformers)
   const flood = floodWait()

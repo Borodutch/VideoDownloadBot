@@ -3382,6 +3382,38 @@ e2e(
 )
 
 e2e(
+  "bot: a post's album refused with a web server's HTML 413 page (the cloud Bot API's, for a request over its size) goes one by one, while an HTML 5xx page fails the post, as the album may have gone out all the same",
+  async () => {
+    // nginx's pages, not the Bot API's JSON: chat 1's album too big, chat 2's
+    // a bad gateway
+    const bot = start({}, (c) => {
+      const status = c.chat === 1 ? 413 : 502
+      return c.method === 'sendMediaGroup' ? new Response(`<html>${status}</html>`, { status, headers: { 'content-type': 'text/html' } }) : 0
+    })
+    let jobs: string[] = []
+    try {
+      bot.link(1, 'post45&multi&n=2')
+      bot.link(2, 'post46&multi&n=2')
+      await bot.until(() => done(bot, 1) && done(bot, 2))
+    } finally {
+      jobs = await bot.stop()
+    }
+    const sends = (chat: number) =>
+      bot.calls.filter((c) => c.chat === chat && /^send(Video|Document|MediaGroup)$/.test(c.method)).map((c) => [c.method, c.upload])
+    expect(sends(1)).toEqual([
+      ['sendMediaGroup', true],
+      ['sendVideo', true],
+      ['sendVideo', true],
+    ])
+    expect(sends(2)).toEqual([['sendMediaGroup', true]])
+    expect(bot.statuses(2).at(-1)).toBe(t('en', 'failed'))
+    expect(jobs.map((l) => l.split(' ', 2)[1]).sort()).toEqual(['error', 'ok'])
+    expect(jobs.filter((l) => /^job ok .* items=2\/2 /.test(l))).toHaveLength(1)
+  },
+  30_000,
+)
+
+e2e(
   "bot: a post's long video goes in its job's own slot and its short one in another; that slot done with its own, it takes the other's download over, whose slot goes to whoever waits",
   async () => {
     // Three slots, two of them for long videos; one user's share of them two,

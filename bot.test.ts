@@ -1,10 +1,14 @@
 import { expect, test } from 'bun:test'
-import { Api, InputFile, type Transformer } from 'grammy'
+import { Api, HttpError, InputFile, type Transformer } from 'grammy'
 import type { Message } from 'grammy/types'
 import { Database } from 'bun:sqlite'
+import { createReadStream, type ReadStream } from 'node:fs'
+import { type AddressInfo, createServer, type Socket } from 'node:net'
+import type { Readable } from 'node:stream'
 import {
   ALBUM,
   albumSender,
+  apiFetch,
   census,
   Dead,
   answer,
@@ -1472,6 +1476,160 @@ test('album: a single file, and files of different kinds, go file by file', asyn
     fake.stop()
   }
 })
+
+test("apiFetch: an album a web server refuses with an HTML 413 page as its upload begins (the cloud Bot API's, over its size) goes file by file; an HTML 5xx page still fails it", async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  // the page comes back as the request arrives, before any of its files is
+  // read (10 MB ones, so their upload isn't over then)
+  const dir = await mkdtemp(join(tmpdir(), 'api-fetch-'))
+  const path = join(dir, 'v.mp4')
+  await Bun.write(path, new Uint8Array(10 * 2 ** 20))
+  // as nginx: an album gets the page without its upload read, a video goes
+  let page = 413
+  const methods: string[] = []
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(req) {
+      const method = new URL(req.url).pathname.split('/').pop()!
+      methods.push(method)
+      if (method === 'sendMediaGroup') return new Response(`<html>${page}</html>`, { status: page, headers: { 'content-type': 'text/html' } })
+      await req.arrayBuffer()
+      return Response.json(sentAs('video'))
+    },
+  })
+  try {
+    const api = new Api('1:test', { apiRoot: `http://127.0.0.1:${server.port}`, fetch: apiFetch })
+    // the files one by one a byte each: only the album's upload is under test
+    const one = sender(api)
+    const send = albumSender(api, (dest, kind, _, opts) => one(dest, kind, () => new InputFile(new Uint8Array(1)), opts))
+    const sent = await send({ chat: -100 }, items(() => new InputFile(path), 'video', 'video'))
+    expect(sent.map((s) => s?.[0])).toEqual(['video', 'video'])
+    expect(methods).toEqual(['sendMediaGroup', 'sendVideo', 'sendVideo'])
+    // a bad gateway's: the album may have gone out, so not file by file
+    page = 502
+    methods.length = 0
+    await expect(send({ chat: -100 }, items(() => new InputFile(path), 'video', 'video'))).rejects.toBeInstanceOf(HttpError)
+    expect(methods).toEqual(['sendMediaGroup'])
+  } finally {
+    server.stop(true)
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test("apiFetch: an album answered mid-upload, its first file half sent, goes file by file when refused with a web server's HTML 413 page (the cloud Bot API's, over its size), its upload closed at once whether or not the page itself comes, or with a JSON 413 whose body comes after its head; an HTML 5xx page, a reset and a timeout fail it; and every file it opened is closed after", async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'api-fetch-'))
+  const path = join(dir, 'v.mp4')
+  await Bun.write(path, new Uint8Array(10 * 2 ** 20))
+  // the album's files: each stream one is read through
+  const opened: ReadStream[] = []
+  const file = () =>
+    new InputFile(() => {
+      const s = createReadStream(path)
+      opened.push(s)
+      return s
+    })
+  // an answer's head and body
+  const reply = (code: number, body: string, type = 'text/html') =>
+    [`HTTP/1.1 ${code} X\r\ncontent-type: ${type}\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n`, body] as const
+  const html413 = reply(413, '<html>413</html>')
+  const json413 = reply(413, JSON.stringify({ ok: false, error_code: 413, description: 'Request Entity Too Large' }), 'application/json')
+  // what the server does once 1 MB of an album is in (paused, it reads no
+  // more of the upload), and what becomes of the album: it goes file by file,
+  // its upload closed as its answer reaches grammY (an HTML 413: refused, so
+  // nothing more is read) or still on (the answer's body yet to come); or it
+  // fails
+  const cases: [string, (s: Socket) => unknown, 'closed' | 'on' | 'fails'][] = [
+    // nginx's: the page whole, the connection closed
+    ['an HTML 413 page', (s) => s.end(html413.join('')), 'closed'],
+    ['an HTML 413 head, its page held back', (s) => s.pause().write(html413[0]), 'closed'],
+    [
+      'a JSON 413 head, its body once the head reached grammY',
+      (s) => {
+        s.pause().write(json413[0])
+        answered = () => s.end(json413[1])
+      },
+      'on',
+    ],
+    ['an HTML 502 page', (s) => s.end(reply(502, '<html>502</html>').join('')), 'fails'],
+    ['a reset', (s) => s.resetAndDestroy(), 'fails'],
+    ['nothing: a timeout', (s) => s.pause(), 'fails'],
+  ]
+  let act = cases[0]![1]
+  // what the server does once the album's answer has reached grammY
+  let answered = () => {}
+  const methods: string[] = []
+  const sockets = new Set<Socket>()
+  const server = createServer((s) => {
+    sockets.add(s)
+    let method = ''
+    let n = 0
+    let tail = ''
+    s.on('error', () => {}).on('data', (d: Buffer) => {
+      if (!method) methods.push((method = /\/(\w+) HTTP/.exec(d.toString('latin1'))![1]!))
+      n += d.length
+      // a video's (chunked) request is answered once it's all in
+      if (method !== 'sendMediaGroup') {
+        tail = (tail + d.subarray(-7).toString('latin1')).slice(-7)
+        if (tail === '\r\n0\r\n\r\n') s.end(reply(200, JSON.stringify(sentAs('video')), 'application/json').join(''))
+      } else if (n >= 2 ** 20 && n - d.length < 2 ** 20) act(s)
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  try {
+    const apiRoot = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    // 2 s for the album (the timeout case), and whether grammY's upload
+    // stream was closed once apiFetch had the album's answer. The files one by
+    // one get grammY's default timeout and a byte each: only the album's
+    // upload is under test, and big ones would slow the other tests running
+    // at once
+    let closed: boolean | undefined
+    const api = new Api('1:test', {
+      apiRoot,
+      timeoutSeconds: 2,
+      fetch: async (url: string, init: RequestInit) => {
+        const res = await apiFetch(url, init)
+        closed = (init.body as unknown as Readable).destroyed
+        answered()
+        answered = () => {}
+        return res
+      },
+    })
+    const one = sender(new Api('1:test', { apiRoot, fetch: apiFetch }))
+    const send = albumSender(api, (dest, kind, _, opts) => one(dest, kind, () => new InputFile(new Uint8Array(1)), opts))
+    for (const [what, how, then] of cases) {
+      act = how
+      methods.length = 0
+      opened.length = 0
+      closed = undefined
+      const out = await send({ chat: -100 }, items(file, 'video', 'video')).then(
+        (sent) => sent.map((s) => s?.[0]).join(),
+        (e) => (e instanceof HttpError ? 'HttpError' : String(e)),
+      )
+      // the album's first file was open then
+      const started = opened.length > 0
+      for (let i = 0; i < 100 && opened.some((s) => !s.closed); i++) await Bun.sleep(10)
+      const byFile = then !== 'fails'
+      expect([what, out, methods, started, byFile && closed, opened.filter((s) => !s.closed).length]).toEqual([
+        what,
+        byFile ? 'video,video' : 'HttpError',
+        byFile ? ['sendMediaGroup', 'sendVideo', 'sendVideo'] : ['sendMediaGroup'],
+        true,
+        then === 'closed',
+        0,
+      ])
+    }
+  } finally {
+    for (const s of sockets) s.destroy()
+    server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 30_000)
 
 // floodWait around a fake API call: answer(method, n) is the n-th answer
 // overall; calls has each call's method, chat and ms since the start
