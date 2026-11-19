@@ -3,7 +3,10 @@ import { Api, InputFile, type Transformer } from 'grammy'
 import type { Message } from 'grammy/types'
 import { Database } from 'bun:sqlite'
 import {
+  ALBUM,
+  albumSender,
   census,
+  Dead,
   answer,
   biggest,
   claims,
@@ -20,6 +23,8 @@ import {
   onDisk,
   outcome,
   picked,
+  picks,
+  posted,
   probe,
   progress,
   PROGRESS,
@@ -36,6 +41,7 @@ import {
   THUMB,
   Timeout,
   unasked,
+  unfit,
   unready,
   unsend,
   unstarted,
@@ -324,6 +330,55 @@ test('picked: nothing, empty and YouTube playlists are not a video', () => {
   expect(picked({ id: 'v', extractor_key: 'Youtube' })).toEqual({ id: 'v', extractor_key: 'Youtube' })
 })
 
+test("picks: a video alone, a post's videos each once and ALBUM at most, null for a playlist of links; nothing, an empty or YouTube playlist is no video", () => {
+  const video = { id: 'v', extractor_key: 'Youtube' }
+  expect(picks(video)).toEqual([video])
+  expect(key(() => picks(null))).toBeNull()
+  expect(key(() => picks({ _type: 'playlist', extractor_key: 'BBC', entries: [] }))).toBeNull()
+  expect(key(() => picks({ _type: 'playlist', extractor_key: 'YoutubeTab', entries: [video] }))).toBeNull()
+  // a picture in a post is null in it: yt-dlp can't read it as a video
+  const item = (id: string) => ({ id, extractor_key: 'Instagram' })
+  expect(key(() => picks({ _type: 'playlist', extractor_key: 'Instagram', entries: [null, null] }))).toBeNull()
+  expect(picks({ _type: 'playlist', extractor_key: 'Instagram', entries: [item('a'), null, item('b'), item('a')] })).toEqual([
+    item('a'),
+    item('b'),
+  ])
+  const many = Array.from({ length: ALBUM + 2 }, (_, i) => item(`i${i}`))
+  expect(picks({ _type: 'playlist', extractor_key: 'Generic', entries: many })).toEqual(many.slice(0, ALBUM))
+  // links, which --flat-playlist leaves unread, or a playlist in it
+  const link = { _type: 'url', ie_key: 'TikTok', url: 'https://www.tiktok.com/@a/video/1' }
+  expect(picks({ _type: 'playlist', extractor_key: 'TikTokUser', entries: [link] })).toBeNull()
+  expect(picks({ _type: 'playlist', extractor_key: 'Generic', entries: [item('a'), link] })).toBeNull()
+  expect(picks({ _type: 'playlist', extractor_key: 'Generic', entries: [{ _type: 'playlist', id: 'p', entries: [] }] })).toBeNull()
+  // a multi_video (one video in parts) sends its first part, as before, and
+  // one whose parts --flat-playlist left links is read as before
+  const part = (id: string) => ({ id, extractor_key: 'BiliBili' })
+  expect(picks({ _type: 'multi_video', extractor_key: 'BiliBili', entries: [part('p1'), part('p2')] })).toEqual([part('p1')])
+  expect(picks({ _type: 'multi_video', extractor_key: 'Generic', entries: [link] })).toBeNull()
+})
+
+test('posted: what a failed -J printed is a post with a video in it, not one without, a video or nothing', () => {
+  const post = (entries: unknown[]) => JSON.stringify({ _type: 'playlist', extractor_key: 'Instagram', entries })
+  expect(posted(post([null, { id: 'a' }]))).toBe(true)
+  expect(posted(post([null, null]))).toBe(false)
+  // a multi_video (one video in parts) whose later part failed: main read
+  // only its first
+  expect(posted(JSON.stringify({ _type: 'multi_video', extractor_key: 'AfreecaTV', entries: [{ id: 'm1' }, null] }))).toBe(true)
+  expect(posted(post([{ _type: 'url', url: 'https://x.example/1' }]))).toBe(false)
+  expect(posted(JSON.stringify({ id: 'v' }))).toBe(false)
+  for (const out of ['null', '', undefined, '{"_type": "playlist", "entries": ['])
+    expect(posted(out)).toBe(false)
+})
+
+test("unfit: a stream that can't be downloaded yet, or a video yt-dlp says is too big, can't be sent", () => {
+  expect(unfit({ live_status: 'is_live' })?.key).toBe('live')
+  expect(unfit({ live_status: 'is_upcoming' })?.key).toBe('upcoming')
+  expect(unfit({ filesize: 3000 * 2 ** 20 })?.key).toBe('tooBig')
+  expect(unfit({ requested_formats: [{ filesize: 1500 * 2 ** 20 }, { filesize_approx: 1500 * 2 ** 20 }] })?.key).toBe('tooBig')
+  expect(unfit({ filesize: 1000, live_status: 'was_live' })).toBeUndefined()
+  expect(unfit({})).toBeUndefined()
+})
+
 test('unstarted: streams that have not begun vs other failures', () => {
   for (const why of [
     'ERROR: [youtube] dQw4w9WgXcQ: This live event will begin in 5 hours.',
@@ -564,6 +619,41 @@ test('limit: a turn handed over counts for its user', async () => {
   // b now has one running, c none
   await finish('x2')
   expect(started).toEqual(['x1', 'x2', 'y1', 'b1', 'c1'])
+})
+
+test("limit: spare takes a turn only when one is free for the fn, within its user's share and the long lane, never once closed, and its end hands it on", async () => {
+  const run = limit(3, 1)
+  const { started, job, finish } = jobs()
+  // a's fn and a spare turn of a's: a's share of three is two
+  const a1 = run.run(job('a1'), 'a')
+  const spare = run.spare('a')!
+  expect(spare).toBeFunction()
+  expect(run.spare('a')).toBeUndefined()
+  // b's long fn has the last turn: none is spare, and c's fn waits
+  const long = await run.take('b', true)
+  expect(run.spare('c')).toBeUndefined()
+  const c1 = run.run(job('c1'), 'c')
+  await Bun.sleep(0)
+  expect(started).toEqual(['a1'])
+  // the spare turn's end hands it on, once
+  spare()
+  spare()
+  await Bun.sleep(0)
+  expect(started).toEqual(['a1', 'c1'])
+  expect(run.spare('d')).toBeUndefined()
+  // a turn is free once a1 is done, but not for a long fn: b's has the long lane
+  await finish('a1')
+  await a1
+  expect(run.spare('d', true)).toBeUndefined()
+  const short = run.spare('d')!
+  expect(short).toBeFunction()
+  short()
+  long()
+  // nothing spare starts in a restart, though a turn is free
+  run.close(new Error('restarting'))
+  expect(run.spare('e')).toBeUndefined()
+  await finish('c1')
+  await c1
 })
 
 test('limit: a failed fn frees its turn', async () => {
@@ -1047,14 +1137,19 @@ const sentAs = (kind: 'video' | 'document') => ({
 // every address can share its port with another process's loopback one,
 // which then takes the calls (#459)
 function fakeApi(answer: (method: string, n: number) => object, wait: Transformer = floodWait()) {
-  const calls: { method: string; at: number }[] = []
+  // payload = what the call sent: its fields, a file field as a Blob
+  const calls: { method: string; at: number; payload: Record<string, any> }[] = []
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
     async fetch(req) {
-      await req.arrayBuffer()
+      const type = req.headers.get('content-type') ?? ''
+      let payload: Record<string, any> = {}
+      if (type.includes('multipart')) payload = Object.fromEntries(await req.formData())
+      else if (type.includes('json')) payload = await req.json()
+      else await req.arrayBuffer()
       const method = new URL(req.url).pathname.split('/').pop()!
-      calls.push({ method, at: Date.now() })
+      calls.push({ method, at: Date.now(), payload })
       return Response.json(answer(method, calls.filter((c) => c.method === method).length))
     },
   })
@@ -1139,6 +1234,159 @@ test('send: a fresh file Telegram refuses as a video still goes as a document', 
     expect(kind).toBe('document')
     expect(fake.methods()).toEqual(['sendVideo', 'sendDocument'])
     expect(kept).toEqual(['u'])
+  } finally {
+    fake.stop()
+  }
+})
+
+// What the Bot API answers an album of n files of kind with
+const album = (kind: 'video' | 'audio', n: number) => ({
+  ok: true,
+  result: Array.from({ length: n }, (_, i) => ({
+    message_id: 10 + i,
+    date: 0,
+    chat: { id: -100, type: 'supergroup', title: 'g' },
+    [kind]: { file_id: `${kind}-${i}`, file_unique_id: `u${i}`, width: 1, height: 1, duration: 1 },
+  })),
+})
+// A post's files: kinds[i] as the i-th, by file (a fresh one, or a file_id),
+// each with its own caption
+const items = (file: () => string | InputFile, ...kinds: ('video' | 'audio')[]) =>
+  kinds.map((kind, i) => ({
+    kind,
+    file,
+    opts: { caption: `c${i}`, parse_mode: 'HTML' as const, duration: 2, width: 4, height: 3, reply_parameters: { message_id: 5 }, disable_notification: false },
+  }))
+
+test("album: 2-10 videos go as one album, the first one's caption, reply and notification the album's, and each file is kept", async () => {
+  const fake = fakeApi(() => album('video', 3))
+  try {
+    const kept: string[] = []
+    const dest: { chat: number; sent?: number; more?: number[] } = { chat: -100 }
+    const sent = await video((path) =>
+      albumSender(fake.api, sender(fake.api), (f) => kept.push(f))(dest, items(() => new InputFile(path), 'video', 'video', 'video')),
+    )
+    expect(sent.map((s) => s && [s[0], s[1]])).toEqual([
+      ['video', 'video-0'],
+      ['video', 'video-1'],
+      ['video', 'video-2'],
+    ])
+    expect([dest.sent, dest.more, kept]).toEqual([10, [11, 12], ['u0', 'u1', 'u2']])
+    expect(fake.methods()).toEqual(['sendMediaGroup'])
+    const { payload } = fake.calls[0]!
+    // each file uploaded, by the field the album names it by
+    const media = JSON.parse(payload.media)
+    expect(media.map((m: any) => [m.type, m.caption, m.parse_mode, m.width, m.duration])).toEqual([
+      ['video', 'c0', 'HTML', 4, 2],
+      ['video', undefined, undefined, 4, 2],
+      ['video', undefined, undefined, 4, 2],
+    ])
+    for (const m of media) expect(payload[m.media.replace('attach://', '')]).toBeInstanceOf(Blob)
+    expect([JSON.parse(payload.reply_parameters), payload.disable_notification]).toEqual([{ message_id: 5 }, 'false'])
+  } finally {
+    fake.stop()
+  }
+})
+
+test('album: one Telegram refuses (a 400, a 413) goes file by file, each with its caption; a 429 or a 5xx fails it, and a cached file_id Telegram no longer has fails it with Dead', async () => {
+  const refused = fakeApi((method) =>
+    method === 'sendMediaGroup' ? { ok: false, error_code: 400, description: 'Bad Request: VIDEO_CONTENT_TYPE_INVALID' } : sentAs('video'),
+  )
+  try {
+    const dest: { chat: number; sent?: number; more?: number[] } = { chat: -100 }
+    const sent = await video((path) =>
+      albumSender(refused.api, sender(refused.api))(dest, items(() => new InputFile(path), 'video', 'video')),
+    )
+    expect(sent.map((s) => s?.[0])).toEqual(['video', 'video'])
+    expect(refused.methods()).toEqual(['sendMediaGroup', 'sendVideo', 'sendVideo'])
+    expect(refused.calls.slice(1).map((c) => c.payload.caption)).toEqual(['c0', 'c1'])
+    expect([dest.sent, dest.more]).toEqual([7, [7]])
+  } finally {
+    refused.stop()
+  }
+  // too big for one request (the cloud Bot API) goes file by file too, while
+  // a 5xx fails it: the album may have gone out, and file by file it would
+  // go twice
+  for (const [code, methods] of [
+    [413, ['sendMediaGroup', 'sendVideo', 'sendVideo']],
+    [500, ['sendMediaGroup']],
+  ] as const) {
+    const fake = fakeApi((method) =>
+      method === 'sendMediaGroup' ? { ok: false, error_code: code, description: `${code}` } : sentAs('video'),
+    )
+    try {
+      const sent = video((path) => albumSender(fake.api, sender(fake.api))({ chat: -100 }, items(() => new InputFile(path), 'video', 'video')))
+      if (code === 500) await expect(sent).rejects.toMatchObject({ error_code: 500 })
+      else expect((await sent).map((s) => s?.[0])).toEqual(['video', 'video'])
+      expect(fake.methods()).toEqual([...methods])
+    } finally {
+      fake.stop()
+    }
+  }
+  // a 429 that outlasts floodWait's retries, as a file's would
+  const flooded = fakeApi(() => flood(0.01), floodWait(1))
+  try {
+    const sent = video((path) => albumSender(flooded.api, sender(flooded.api))({ chat: -100 }, items(() => new InputFile(path), 'video', 'video')))
+    await expect(sent).rejects.toMatchObject({ error_code: 429 })
+    expect(flooded.methods()).toEqual(['sendMediaGroup', 'sendMediaGroup'])
+  } finally {
+    flooded.stop()
+  }
+  // cached file_ids, one of them gone, which Telegram doesn't say: the
+  // caller forgets them
+  const gone = fakeApi(() => ({ ok: false, error_code: 400, description: 'Bad Request: wrong file identifier/HTTP URL specified' }))
+  try {
+    const sent = albumSender(gone.api, sender(gone.api))({ chat: -100 }, items(() => 'BAACAgIAAxkBAAIBY2', 'video', 'video'))
+    await expect(sent).rejects.toBeInstanceOf(Dead)
+    expect(gone.methods()).toEqual(['sendMediaGroup'])
+  } finally {
+    gone.stop()
+  }
+})
+
+test("album: file by file, a cached file_id Telegram no longer has is left out and the others go on; a fresh file's failure fails it", async () => {
+  // of different kinds, so file by file: a cached video, a cached one
+  // Telegram no longer has (its 2nd sendVideo) and a cached audio file
+  const dead = { ok: false, error_code: 400, description: 'Bad Request: wrong file identifier/HTTP URL specified' }
+  const audio = { ok: true, result: { message_id: 8, date: 0, chat: { id: -100, type: 'supergroup', title: 'g' }, audio: { file_id: 'a', file_unique_id: 'ua', duration: 1 } } }
+  const fake = fakeApi((method, n) => (method === 'sendAudio' ? audio : n === 2 ? dead : sentAs('video')))
+  try {
+    const dest: { chat: number; sent?: number; more?: number[] } = { chat: -100 }
+    const sent = await albumSender(fake.api, sender(fake.api))(dest, items(() => 'cached', 'video', 'video', 'audio'))
+    expect(sent.map((s) => s && [s[0], s[1]])).toEqual([['video', 'video-id'], undefined, ['audio', 'a']])
+    expect(fake.methods()).toEqual(['sendVideo', 'sendVideo', 'sendAudio'])
+    expect([dest.sent, dest.more]).toEqual([7, [8]])
+  } finally {
+    fake.stop()
+  }
+  // a fresh file Telegram takes neither as a video nor as a document
+  const refused = fakeApi((method) => (method === 'sendAudio' ? audio : dead))
+  try {
+    const sent = video((path) => albumSender(refused.api, sender(refused.api))({ chat: -100 }, items(() => new InputFile(path), 'audio', 'video')))
+    await expect(sent).rejects.toMatchObject({ error_code: 400 })
+    expect(refused.methods()).toEqual(['sendAudio', 'sendVideo', 'sendDocument'])
+  } finally {
+    refused.stop()
+  }
+})
+
+test('album: a single file, and files of different kinds, go file by file', async () => {
+  const fake = fakeApi((method) =>
+    method === 'sendAudio'
+      ? { ok: true, result: { message_id: 8, date: 0, chat: { id: -100, type: 'supergroup', title: 'g' }, audio: { file_id: 'a', file_unique_id: 'ua', duration: 1 } } }
+      : sentAs('video'),
+  )
+  try {
+    const send = albumSender(fake.api, sender(fake.api))
+    await video((path) => send({ chat: -100 }, items(() => new InputFile(path), 'video')))
+    const dest: { chat: number; sent?: number; more?: number[] } = { chat: -100 }
+    const sent = await video((path) => send(dest, items(() => new InputFile(path), 'video', 'audio')))
+    expect(sent.map((s) => s && [s[0], s[1]])).toEqual([
+      ['video', 'video-id'],
+      ['audio', 'a'],
+    ])
+    expect(fake.methods()).toEqual(['sendVideo', 'sendVideo', 'sendAudio'])
+    expect([dest.sent, dest.more]).toEqual([7, [8]])
   } finally {
     fake.stop()
   }

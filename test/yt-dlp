@@ -14,10 +14,23 @@
 // link, signed anew in its query on every read, ends in its letter, and its
 // id is that letter too; one with "embed" in it is a generic page's <video>
 // as yt-dlp tells one, a format "0" that says nothing else, whose link picks
-// the clip by its query, clip=<letter>; one with "multi" in it is a post with
-// several videos, a playlist of its first one, as -J --playlist-items 1 tells
-// it, whose saved info a download reads the page again from, as yt-dlp does
-// with no entries to download (it drops them from saved info); one with
+// the clip by its query, clip=<letter>; one with "multi" in it is a post, a
+// playlist of its n=<count> videos (1 without n; with "mvid" in it too, a
+// multi_video: one video in parts), as many of them as
+// --playlist-items (the last one) asks for: the first one's id is the
+// post's, the i-th's <id>-<i>, and the ones listed in pic=<i,...> are
+// pictures, which yt-dlp can't read: -J lists each as null, says so and
+// exits 1, with the rest; the ones in gone=<i,...> fail so too, but as a
+// video whose page couldn't be read; the ones in big=<i,...> are 3000 MB, the
+// ones in lengthy=<i,...> 50 minutes long (the others 30 s), the ones in
+// live=<i,...> live now, and the download of one in bad=<i,...> fails as a
+// "broken" one's does; a run with --cookies notes their file in $PAGES/<id>
+// (cookies <path>); a playlist's
+// saved info a download reads the page
+// again from, as yt-dlp does with no entries to download (it drops them from
+// saved info); one with "channel" in it is a playlist of links to n videos,
+// listed as such with --flat-playlist, else with its first one read, a
+// video of its own, v=<id>-1; one with
 // "stuck" in it takes 30 s to describe when the page has been read before; a
 // page read before with next=<id> in its link picks another video instead (a
 // post's first one, with "multi"): 40 s of audio titled "Next", by
@@ -116,7 +129,12 @@ if (args.includes('-J') && !youtube(url)) {
   console.error(`ERROR: Unsupported URL: ${url}`)
   process.exit(1)
 }
-const id = new URL(url).searchParams.get('v')!
+// the video's: a post's other videos have ids of their own (multi)
+const id: string = saved?.id ?? new URL(url).searchParams.get('v')!
+// whether a playlist's i-th item is asked for: the last --playlist-items, a or a:b
+const at = args.lastIndexOf('--playlist-items')
+const [from, to = from] = at < 0 ? [1, Infinity] : args[at + 1]!.split(':').map(Number)
+const asked = (i: number) => i >= from! && i <= to!
 const long = url.includes('long')
 const reel = url.includes('reel')
 const lengthless = reel || url.includes('stream')
@@ -152,6 +170,7 @@ if (args.includes('-J') && url.includes('news')) {
 }
 const pages = process.env.PAGES
 const log = pages ? join(pages, id) : undefined
+if (log && args.includes('--cookies')) appendFileSync(log, `cookies ${args[args.indexOf('--cookies') + 1]}\n`)
 // how many times the page has been read before
 const reads = log && existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter((l) => l === 'read').length : 0
 const before = reads > 0
@@ -199,13 +218,51 @@ if (args.includes('-J')) {
           filesize: next.includes('big') ? 3000 * 2 ** 20 : undefined,
         }
       : video
-  console.log(
-    JSON.stringify(
-      multi
-        ? { _type: 'playlist', id, extractor_key: embed ? 'Generic' : 'Twitter', title: 'Post', webpage_url: url, entries: [shown] }
-        : shown,
-    ),
-  )
+  const params = new URL(url).searchParams
+  // the playlist's items asked for, from 1 to n
+  const items = [...Array(Number(params.get('n') ?? 1)).keys()].map((k) => k + 1).filter(asked)
+  if (url.includes('channel')) {
+    const link = (i: number) => `https://www.youtube.com/watch?v=${id}-${i}`
+    const entries = items.map((i) =>
+      args.includes('--flat-playlist')
+        ? { _type: 'url', ie_key: 'Youtube', id: `${id}-${i}`, url: link(i), title: `Video ${i}` }
+        : { ...video, id: `${id}-${i}`, webpage_url: link(i), url: `https://media.example/${id}-${i}/${letter}.mp4` },
+    )
+    console.log(JSON.stringify({ _type: 'playlist', id, extractor_key: 'TikTokUser', title: 'Channel', webpage_url: url, entries }))
+  } else if (multi) {
+    const list = (name: string) => (params.get(name) ?? '').split(',').map(Number)
+    const pics = list('pic')
+    const gone = list('gone')
+    const own = (i: number) => (i === 1 ? id : `${id}-${i}`)
+    const entries = items.map((i) =>
+      pics.includes(i) || gone.includes(i)
+        ? null
+        : {
+            ...(i === 1
+              ? shown
+              : { ...video, id: own(i), url: `https://media.example/${own(i)}/${letter}.mp4?sig=${Math.random().toString(36).slice(2)}` }),
+            ...(list('big').includes(i) ? { filesize: 3000 * 2 ** 20 } : {}),
+            ...(list('lengthy').includes(i) ? { duration: 3000 } : {}),
+            ...(list('live').includes(i) ? { live_status: 'is_live' } : {}),
+          },
+    )
+    console.log(
+      JSON.stringify({
+        _type: url.includes('mvid') ? 'multi_video' : 'playlist',
+        id,
+        extractor_key: embed ? 'Generic' : 'Twitter',
+        title: 'Post',
+        webpage_url: url,
+        entries,
+      }),
+    )
+    const missing = items.filter((i) => pics.includes(i) || gone.includes(i))
+    for (const i of missing)
+      console.error(
+        `ERROR: [twitter] ${own(i)}: ${pics.includes(i) ? 'No video formats found!' : 'Unable to download JSON metadata: HTTP Error 404: Not Found'}`,
+      )
+    if (missing.length) process.exit(1)
+  } else console.log(JSON.stringify(shown))
 } else {
   const out = args[args.indexOf('-o') + 1]!.replace('%(ext)s', 'mp4')
   // the job's first download leaves a mark in its dir
@@ -321,7 +378,10 @@ if (args.includes('-J')) {
   if (crawl) writeFileSync(`${out}.part`, new Uint8Array(2 * 2 ** 20))
   // a held download took its time already
   if (!url.includes('dhold')) await sleep(crawl ? 9000 : long ? 3000 : 200)
-  if (url.includes('broken')) {
+  // a post's video: its place in the post (multi)
+  const nth = Number(/-(\d+)$/.exec(id)?.[1] ?? 1)
+  const bad = (new URL(url).searchParams.get('bad') ?? '').split(',').map(Number).includes(nth)
+  if (url.includes('broken') || bad) {
     writeFileSync(`${out}.part`, new Uint8Array(3 * 2 ** 20))
     console.error('ERROR: unable to download video data: HTTP Error 403: Forbidden')
     process.exit(1)
