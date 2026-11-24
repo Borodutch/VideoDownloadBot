@@ -126,14 +126,21 @@ export class Fail extends Error {
 // live and embed pages)
 const NEWS = /^(?!.*(video|live|embed)).*(article|news)|^(bbc|cnn|spiegel|voxmedia|lenta)$/i
 
+// Reddit shows yt-dlp no post without a logged-in account (yt-dlp's hint to
+// pass --cookies), nor any to an address it blocks, nor one its API refuses
+// for another reason (a 403's), and most of its posts are text, pictures or
+// links: a post it walls off says nothing about a video
+const REDDIT_WALL = /^(ERROR: )?\[Reddit\] .*(use --cookies|unable to access the reddit api|403 forbidden; reason given)/i
+
 // Whether a yt-dlp error means the page has no video rather than a video
 // that failed: the generic extractor on any page (no such site, 403, nothing
-// embedded) or a site saying so. Not getting or not parsing the page only
-// counts from a news extractor (NYT, Spiegel, Vox on an article without
-// media); on a video site it's a real failure. Crashes carry no [extractor]
-// tag, so ies = the extractors that claim the link.
+// embedded), a site saying so, or Reddit not showing the post. Not getting
+// or not parsing the page only counts from a news extractor (NYT, Spiegel,
+// Vox on an article without media); on a video site it's a real failure.
+// Crashes carry no [extractor] tag, so ies = the extractors that claim the
+// link.
 export function notVideo(why: string, ies: string[] = []) {
-  if (/unsupported url|no video|no media|media blocks|\[generic\]/i.test(why))
+  if (/unsupported url|no video|no media|media blocks|\[generic\]/i.test(why) || REDDIT_WALL.test(why))
     return true
   if (!/unable to (download webpage|extract|find)|extractor error has occurred/i.test(why))
     return false

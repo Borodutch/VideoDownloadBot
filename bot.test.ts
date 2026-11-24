@@ -285,7 +285,21 @@ test('links: a copy of a file the bot has sent asks for nothing, as the message 
 // yt-dlp's last stderr line (and the link's extractors, which only matter
 // for untagged errors) for pages that have no video, mostly seen live...
 const crash = "ERROR: a: An extractor error has occurred. (caused by KeyError('initialData')); please report this issue"
+// (what yt-dlp adds to an error when a site wants a login)
+const login =
+  '. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies'
 const empty: [string, string[]?][] = [
+  // Reddit walls off every post without a logged-in account (as live, #860),
+  // a quarantined or private subreddit's from an account that may not see
+  // it, all of them from an address it blocks, and others its API refuses
+  // with a 403's reason
+  ['ERROR: [Reddit] 1y3jzys: Account authentication is required' + login],
+  ['ERROR: [Reddit] 1y3jzys: Quarantined subreddit; an account that has opted in is required' + login],
+  ['ERROR: [Reddit] 1y3jzys: Private subreddit; an account that has been approved is required' + login],
+  ['ERROR: [Reddit] 1y3jzys: Your IP address is unable to access the Reddit API'],
+  [
+    'ERROR: [Reddit] 1y3jzys: HTTP Error 403 Forbidden; reason given: banned; please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template. Confirm you are on the latest version using  yt-dlp -U',
+  ],
   ['ERROR: [generic] Unable to download webpage: <urlopen error [Errno -2] Name or service not known>'],
   ['ERROR: Unsupported URL: https://tugport.com/'],
   ['ERROR: [NYTimesArticle] a: Unable to extract any media blocks from webpage'],
@@ -305,6 +319,14 @@ const broken: [string, string[]?][] = [
   ['ERROR: [TikTok] 671: Unable to extract universal data for rehydration'],
   ['ERROR: [TikTok] 671: Unable to download webpage: HTTP Error 403: Forbidden'],
   ['ERROR: [Instagram] C1: Unable to download webpage: HTTP Error 429: Too Many Requests'],
+  // a video site's login wall (as live), and a Reddit video not ready yet
+  ['ERROR: [TikTok] 671: This post may not be comfortable for some audiences. Log in for access' + login],
+  [
+    'ERROR: [Instagram] C1: The webpage request was redirected to the login page. You have exceeded the rate-limit for accessing posts anonymously' +
+      login,
+  ],
+  ['ERROR: [facebook] 1: This video is age-restricted and requires authentication' + login],
+  ['ERROR: [Reddit] 1y3jzys: This video is processing'],
   ['ERROR: [cbsnews:livevideo] a: Unable to download webpage: HTTP Error 403: Forbidden'],
   [crash, ['youtube']],
   [crash, ['FoxNewsVideo']],
@@ -561,10 +583,13 @@ test.skipIf(!Bun.which('yt-dlp') && !process.env.CI)(
     // notVideo() and answer() keep a page without media quiet
     const bbc = 'https://www.bbc.com/news/articles/c123'
     expect(await group(`see ${bbc}`)).toEqual([bbc])
-    // what an untagged crash is judged by
+    // what an untagged crash is judged by, and the name that tags Reddit's
+    // errors, a post it walls off among them: one in a group gets a yt-dlp
+    // run, and notVideo() keeps that wall quiet
     const nyt = 'https://www.nytimes.com/2024/01/01/world/a.html'
-    const by = await claims([nyt, youtube, 'https://tugport.com/'])
-    expect([...by]).toEqual([[nyt, ['NYTimesArticle']], [youtube, ['youtube']]])
+    const reddit = 'https://www.reddit.com/r/FitGirlRepack/comments/1y3jzys/the_executable_is_out_early/'
+    const by = await claims([nyt, youtube, 'https://tugport.com/', reddit])
+    expect([...by]).toEqual([[nyt, ['NYTimesArticle']], [reddit, ['Reddit']], [youtube, ['youtube']]])
     expect(notVideo(crash, by.get(nyt))).toBe(true)
     expect(notVideo(crash, by.get(youtube))).toBe(false)
     const spotify = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC'
