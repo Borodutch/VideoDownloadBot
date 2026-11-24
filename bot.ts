@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite'
 import { type Api, Bot, type Context, GrammyError, HttpError, InputFile, type Transformer } from 'grammy'
 import type { ApiResponse, InputMediaVideo, Message } from 'grammy/types'
 import { existsSync, rmSync, writeFileSync } from 'node:fs'
-import { chmod, copyFile, mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { egressProxy, proxyFreeEnv } from './egress'
@@ -1223,13 +1223,22 @@ async function seedJar() {
 
 // yt-dlp gets a private copy (parallel runs would clobber one file)...
 const taken = new Map<string, number>()
+// ...without Dailymotion's cookies. yt-dlp keeps the API token it gets there
+// and uses any it finds without checking it, though it expires in about 10 h,
+// and an ff=on there turns Dailymotion's family filter on, which refuses
+// explicit videos. Saved back with the rest, an expired token failed every
+// Dailymotion link with HTTP 401 from 2026-10-29 on (#878): each job starts
+// afresh there.
+const DAILYMOTION = /^(#HttpOnly_)?([^\t]*\.)?dailymotion\.com\t/
 async function jar(dir: string) {
   if (!existsSync(JAR)) return []
   taken.set(dir, (await stat(JAR)).mtimeMs)
-  await copyFile(JAR, join(dir, 'cookies.txt'))
+  const copy = join(dir, 'cookies.txt')
+  const lines = (await Bun.file(JAR).text()).split('\n')
   // the job folder may be readable by the Bot API server (scratch.ts), the session isn't
-  await chmod(join(dir, 'cookies.txt'), 0o600)
-  return ['--cookies', join(dir, 'cookies.txt')]
+  await writeFile(copy, lines.filter((l) => !DAILYMOTION.test(l)).join('\n'), { mode: 0o600 })
+  await chmod(copy, 0o600)
+  return ['--cookies', copy]
 }
 
 // ...and its refreshed cookies go back, unless YouTube dropped the login or

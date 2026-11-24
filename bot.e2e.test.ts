@@ -3531,6 +3531,49 @@ e2e(
 )
 
 e2e(
+  "bot: a job's cookies are the jar's without Dailymotion's, whose old API token and family filter yt-dlp would go on using",
+  async () => {
+    // The jar's lines, each followed by a Dailymotion cookie (yt-dlp loads
+    // #HttpOnly_ ones too). The -J notes the file its --cookies names
+    // (test/yt-dlp), which is read while the download is held.
+    const pages = mkdtempSync(join(tmpdir(), 'bot-e2e-pages-'))
+    const jar = join(pages, 'jar.txt')
+    const cookie = (domain: string, name: string) => `${domain}\tFALSE\t/\tFALSE\t0\t${name}\tx`
+    const kept = [
+      '# Netscape HTTP Cookie File',
+      cookie('.youtube.com', 'LOGIN_INFO'),
+      cookie('#HttpOnly_.youtube.com', 'SID'),
+      // other sites, whose names only look like Dailymotion's
+      cookie('notdailymotion.com', 'client_token'),
+      cookie('www.dailymotion.com.example', 'ff'),
+    ]
+    const dailymotion = [
+      cookie('www.dailymotion.com', 'client_token'),
+      cookie('.dailymotion.com', 'ff'),
+      cookie('#HttpOnly_.dailymotion.com', 'access_token'),
+      cookie('dailymotion.com', 'v1st'),
+      cookie('#HttpOnly_dailymotion.com', 'dmvk'),
+    ]
+    writeFileSync(jar, `${kept.flatMap((line, n) => [line, dailymotion[n]]).join('\n')}\n`)
+    const bot = start({ PAGES: pages, COOKIES: jar })
+    let got = ''
+    try {
+      bot.link(1, 'dholdjar1')
+      await bot.until(() => bot.held('dholdjar1', 'dl'))
+      const noted = readFileSync(join(pages, 'dholdjar1'), 'utf8').split('\n').find((l) => l.startsWith('cookies '))
+      got = readFileSync(noted!.slice('cookies '.length), 'utf8')
+      bot.release('dholdjar1', 'dl')
+      await bot.until(() => bot.videos().length === 1)
+    } finally {
+      await bot.stop()
+      rmSync(pages, { recursive: true, force: true })
+    }
+    expect(got).toBe(`${kept.join('\n')}\n`)
+  },
+  30_000,
+)
+
+e2e(
   "bot: a link cached before posts went out whole gets that copy when its page can't be read now or shows no video any more, and is then cached with it (sent again, it goes out without a job), and its post's videos when it can; a guest reply with such a link is answered at once",
   async () => {
     // files has each link under the link itself, as the bot cached them
