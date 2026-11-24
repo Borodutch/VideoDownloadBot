@@ -671,10 +671,11 @@ export const fresh = (f: string | InputFile) =>
 // wait their turn. who = whose fn (a user): one user's fns get at most
 // max - 1 turns, and long ones maxLong - 1 (all of them when there's only
 // one), so a burst of one user's links always leaves someone else a turn; a
-// free turn goes to the first in line among those with the fewest running
-// whose fn fits. Fns without a who share no such limit. A fn in line holds
-// nothing. spare() takes a turn only if one is free (a post's other videos,
-// postJob()).
+// free turn goes to the first in line whose fn fits among those with the
+// fewest running and, of those, the fewest in line, so a few links don't
+// wait behind another user's hundreds that came first (#871). Fns without a
+// who share no such limit. A fn in line holds nothing. spare() takes a turn
+// only if one is free (a post's other videos, postJob()).
 export function limit(max: number, maxLong = max) {
   let running = 0
   let long = 0
@@ -719,10 +720,15 @@ export function limit(max: number, maxLong = max) {
       done = true
       add(who, isLong, -1)
       for (;;) {
+        // each user's fns in line
+        const lined = new Map<unknown, number>()
+        for (const w of queue) lined.set(w.who, (lined.get(w.who) ?? 0) + 1)
+        // whether a's fn goes before b's
+        const before = (a: unknown, b: unknown) =>
+          (mine(a).all - mine(b).all || lined.get(a)! - lined.get(b)!) < 0
         let next = -1
         queue.forEach((w, i) => {
-          if (fits(w.who, w.long) && (next < 0 || mine(w.who).all < mine(queue[next]!.who).all))
-            next = i
+          if (fits(w.who, w.long) && (next < 0 || before(w.who, queue[next]!.who))) next = i
         })
         if (next < 0) return
         const w = queue.splice(next, 1)[0]!

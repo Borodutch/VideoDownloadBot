@@ -651,7 +651,7 @@ function jobs() {
   return { started, job, finish }
 }
 
-test("limit: at most max at once, one user's at most max - 1, a free turn goes to whoever has the fewest running", async () => {
+test("limit: at most max at once, one user's at most max - 1, and of two users with as many running, the one with fewer in line goes first", async () => {
   const run = limit(3)
   const { started, job, finish } = jobs()
   const all = [
@@ -667,18 +667,18 @@ test("limit: at most max at once, one user's at most max - 1, a free turn goes t
   // leaves b a turn
   expect(started).toEqual(['a1', 'a2', 'b1'])
   expect([run.busy(), run.waiting()]).toEqual([true, 3])
-  // a and b have one running each: the first in line goes...
+  // a and b have one running each: b's goes, as b has fewer in line...
   await finish('a1')
-  expect(started).toEqual(['a1', 'a2', 'b1', 'a3'])
-  // ...and b's turn goes to b, as a has its two
+  expect(started).toEqual(['a1', 'a2', 'b1', 'b2'])
+  // ...and then a's, the only ones left
   await finish('b1')
-  expect(started).toEqual(['a1', 'a2', 'b1', 'a3', 'b2'])
+  expect(started).toEqual(['a1', 'a2', 'b1', 'b2', 'a3'])
   await finish('b2')
-  expect(started).toEqual(['a1', 'a2', 'b1', 'a3', 'b2'])
-  // a turn is free, but not for a
+  expect(started).toEqual(['a1', 'a2', 'b1', 'b2', 'a3'])
+  // a turn is free, but not for a, which has its two
   expect([run.busy(), run.busy(false, 'a'), run.busy(false, 'c'), run.waiting()]).toEqual([false, true, false, 1])
   await finish('a2')
-  expect(started).toEqual(['a1', 'a2', 'b1', 'a3', 'b2', 'a4'])
+  expect(started).toEqual(['a1', 'a2', 'b1', 'b2', 'a3', 'a4'])
   await finish('a3')
   await finish('a4')
   expect(run.busy()).toBe(false)
@@ -697,7 +697,8 @@ test("limit: at most max at once, one user's at most max - 1, a free turn goes t
 test('limit: a turn handed over counts for its user', async () => {
   const run = limit(3)
   const { started, job, finish } = jobs()
-  for (const [name, who] of [['x1', 'x'], ['x2', 'x'], ['y1', 'y'], ['b1', 'b'], ['b2', 'b'], ['c1', 'c']])
+  // b and c have as many in line
+  for (const [name, who] of [['x1', 'x'], ['x2', 'x'], ['y1', 'y'], ['b1', 'b'], ['b2', 'b'], ['c1', 'c'], ['c2', 'c']])
     void run.run(job(name!), who)
   await Bun.sleep(0)
   await finish('x1')
@@ -824,16 +825,17 @@ test("limit: a long fn in line holds nothing, so one user's long links don't hol
   // short ones from four users take every turn
   for (const u of ['u1', 'u2', 'u3', 'u4']) go(u, false)
   await Bun.sleep(0)
-  // then a's three long links and b's one
+  // then a's three long links and b's three
   go('a1', true, 'a')
   go('a2', true, 'a')
   go('a3', true, 'a')
-  go('b1', true, 'b')
+  for (let i = 1; i <= 3; i++) go(`b${i}`, true, 'b')
   await Bun.sleep(0)
-  expect(slots.waiting(true)).toBe(4)
+  expect(slots.waiting(true)).toBe(6)
   await j.finish('u1')
   await j.finish('u2')
   await j.finish('u3')
+  // b's first goes before a's second, as b has none running
   expect(j.started.slice(4)).toEqual(['a1', 'b1', 'a2'])
 })
 
@@ -921,6 +923,29 @@ test("limit: own counts a user's fns that have a turn or wait in line for one, l
   void anyone.take()
   void anyone.take()
   expect([anyone.busy(), anyone.waiting(), anyone.own(undefined)]).toEqual([true, 1, 0])
+})
+
+test("limit: of those with the fewest running, the fewest in line go first, so a newcomer's long link doesn't wait behind two bulk users' backlogs (#871)", async () => {
+  // eight turns, seven for long ones, as by default
+  const slots = limit(8, 7)
+  const j = jobs()
+  const go = lane(slots, j)
+  // a's backlog takes a's six long turns and b's the seventh; the rest wait
+  for (let i = 1; i <= 10; i++) go(`a${i}`, true, 'a')
+  for (let i = 1; i <= 10; i++) go(`b${i}`, true, 'b')
+  await Bun.sleep(0)
+  expect(j.started).toEqual(['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'b1'])
+  // c's one long link waits behind their 13
+  go('c1', true, 'c')
+  await Bun.sleep(0)
+  expect(slots.waiting(true)).toBe(14)
+  // b's one running ends: b and c have none running, and c's link goes
+  // before b's next, which has waited longer
+  await j.finish('b1')
+  expect(j.started.slice(7)).toEqual(['c1'])
+  // b still gets the next one of a's: the fewest running go first
+  await j.finish('a1')
+  expect(j.started.slice(8)).toEqual(['b2'])
 })
 
 test('isLong: over 10 minutes; of unknown length too, unless from Instagram or X or 100 MB at most', () => {
