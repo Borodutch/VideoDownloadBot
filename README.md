@@ -1,6 +1,6 @@
 # [@VideoDownloadBot](https://t.me/VideoDownloadBot)
 
-**[@VideoDownloadBot](https://t.me/VideoDownloadBot)** is a free Telegram bot that downloads videos. Send it a link from YouTube, TikTok, Instagram, X, VK, Twitch, Dailymotion, SoundCloud or one of many other sites and it sends the video back in the chat, up to 2 GB. Add it to a group, or mention it in any chat, and it works there too. Reddit, Vimeo and Facebook links need a login and don't work. Open source (MIT), built on yt-dlp.
+**[@VideoDownloadBot](https://t.me/VideoDownloadBot)** is a free Telegram bot that downloads videos. Send it a link from YouTube, TikTok, Instagram, X, Facebook, VK, Twitch, Dailymotion, SoundCloud or one of many other sites and it sends the video back in the chat, up to 2 GB. Add it to a group, or mention it in any chat, and it works there too. Reddit and Vimeo links need a login and don't work. Open source (MIT), built on yt-dlp.
 
 **How to use:** open [t.me/VideoDownloadBot](https://t.me/VideoDownloadBot), press Start, paste a link.
 
