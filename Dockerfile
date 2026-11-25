@@ -4,7 +4,7 @@
 # wireproxy built from source: v1.1.3 is upstream's latest release, and its prebuilt binary carries Go 1.26.5 and
 # x/net and x/crypto versions with known CVEs (#913). The module and the bumped x/ versions (x/sys follows) are
 # pinned and checked against sum.golang.org.
-FROM golang:1.26.11-trixie@sha256:f9e99477a80ccd7adfb69780510b22c7249ce9169885f18aa762cd886e75e018 AS wireproxy
+FROM golang:1.27.4-trixie@sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee AS wireproxy
 RUN go mod download github.com/windtf/wireproxy@v1.1.3 \
   && cp -r "$(go env GOMODCACHE)/github.com/windtf/wireproxy@v1.1.3" /src && chmod -R u+w /src
 WORKDIR /src
